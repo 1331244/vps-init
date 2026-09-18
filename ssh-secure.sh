@@ -1,453 +1,536 @@
 #!/usr/bin/env bash
+
+set -u
+
 # ============================================================
-# 通用 Linux VPS SSH 安全配置脚本
-#
-# 支持：
-# Debian / Ubuntu
-# CentOS Stream / RHEL
-# Rocky Linux / AlmaLinux
-# Fedora
-# Arch Linux
-# openSUSE
-# Alpine Linux
+# VPS SSH 安全初始化脚本
+# GitHub: https://github.com/1331244/vps-init
 #
 # 功能：
-# - 自动识别系统
-# - 自动识别 sshd
-# - 自动识别 SSH 服务
-# - 更新 Root SSH 公钥
-# - 禁止密码登录
-# - 禁止键盘交互认证
-# - Root 仅允许公钥登录
-# - 不修改 SSH 端口
-# - 支持重复执行
-# - 支持更换 SSH 公钥
-# - 不创建任何备份文件
-# ============================================================
-set -u
-set -o pipefail
-# ============================================================
-# 你的 SSH 公钥
+# 1. 更新 Root SSH 公钥
+# 2. 禁止 SSH 密码登录
+# 3. 禁止 SSH Keyboard-Interactive 登录
+# 4. Root 仅允许公钥登录
+# 5. 不修改 SSH 端口
+# 6. 清理可能冲突的 SSH 配置
+# 7. 检查 sshd 实际生效配置
 #
-# 修改这里为你自己的 id_ed25519.pub 完整内容
+# 注意：
+# - 本脚本不提供备份功能
+# - 会覆盖 /root/.ssh/authorized_keys
+# - 请确保下面 PUBLIC_KEY 是你自己的公钥
 # ============================================================
-PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCoRpHB5f4boQ5BF7itCCpKaRtuz2dQ8U1zXqMjL94g 888"
-# ============================================================
-# 基础变量
-# ============================================================
-SSHD_BIN=""
-SSHD_CONFIG=""
-SSH_SERVICE=""
-INIT_SYSTEM=""
-AUTHORIZED_KEYS="/root/.ssh/authorized_keys"
-# ============================================================
-# 输出函数
-# ============================================================
-ok() {
-    printf '\033[32m✓\033[0m %s\n' "$1"
-}
-warn() {
-    printf '\033[33m!\033[0m %s\n' "$1"
-}
-error() {
-    printf '\033[31m✗\033[0m %s\n' "$1"
-}
-info() {
-    printf '  %s\n' "$1"
-}
-die() {
-    error "$1"
-    exit 1
-}
-# ============================================================
+
+set -o pipefail
+
+# ------------------------------------------------------------
 # Root 检查
-# ============================================================
-if [ "$(id -u)" -ne 0 ]; then
-    die "请使用 root 用户运行此脚本。"
+# ------------------------------------------------------------
+
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "✗ 请使用 root 用户运行此脚本。"
+    exit 1
 fi
-# ============================================================
-# 检查公钥
-# ============================================================
-if [ -z "$PUBLIC_KEY" ]; then
-    die "PUBLIC_KEY 为空。"
+
+# ------------------------------------------------------------
+# 公钥
+# ------------------------------------------------------------
+
+PUBLIC_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCoRpHB5f4boQ5BF7itCCpKaRtuz2dQ8U1zXqMjL94g 888'
+
+if [[ -z "$PUBLIC_KEY" || "$PUBLIC_KEY" == "请把你的SSH公钥放在这里" ]]; then
+    echo "✗ PUBLIC_KEY 尚未配置。"
+    echo "请编辑脚本中的 PUBLIC_KEY。"
+    exit 1
 fi
-case "$PUBLIC_KEY" in
-    ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*\ *)
-        ;;
-    *)
-        die "PUBLIC_KEY 格式看起来不正确。"
-        ;;
-esac
-# ============================================================
+
+# ------------------------------------------------------------
+# 基础函数
+# ------------------------------------------------------------
+
+info() {
+    echo "✓ $1"
+}
+
+error() {
+    echo "✗ $1"
+}
+
+warn() {
+    echo "! $1"
+}
+
+# ------------------------------------------------------------
+# 检查 Bash
+# ------------------------------------------------------------
+
+if [[ -z "${BASH_VERSION:-}" ]]; then
+    echo "✗ 此脚本需要 Bash。"
+    exit 1
+fi
+
+# ------------------------------------------------------------
 # 检测系统
-# ============================================================
-if [ -f /etc/os-release ]; then
+# ------------------------------------------------------------
+
+OS_NAME="Unknown"
+
+if [[ -f /etc/os-release ]]; then
     . /etc/os-release
-    OS_NAME="${PRETTY_NAME:-Linux}"
-    OS_ID="${ID:-unknown}"
-else
-    OS_NAME="Unknown Linux"
-    OS_ID="unknown"
+    OS_NAME="${PRETTY_NAME:-${NAME:-Unknown}}"
 fi
-ok "系统：$OS_NAME"
-# ============================================================
-# 检测 Init 系统
-# ============================================================
-if command -v systemctl >/dev/null 2>&1 \
-    && [ -d /run/systemd/system ]; then
+
+info "系统：$OS_NAME"
+
+# ------------------------------------------------------------
+# 检测 Init
+# ------------------------------------------------------------
+
+INIT_SYSTEM="unknown"
+
+if command -v systemctl >/dev/null 2>&1; then
     INIT_SYSTEM="systemd"
 elif command -v rc-service >/dev/null 2>&1; then
     INIT_SYSTEM="openrc"
-else
-    INIT_SYSTEM="unknown"
 fi
-ok "Init：$INIT_SYSTEM"
-# ============================================================
+
+info "Init：$INIT_SYSTEM"
+
+# ------------------------------------------------------------
 # 检测 sshd
-# ============================================================
-if command -v sshd >/dev/null 2>&1; then
-    SSHD_BIN="$(command -v sshd)"
-else
-    for path in \
-        /usr/sbin/sshd \
-        /sbin/sshd \
-        /usr/local/sbin/sshd
-    do
-        if [ -x "$path" ]; then
-            SSHD_BIN="$path"
-            break
-        fi
-    done
-fi
-if [ -z "$SSHD_BIN" ]; then
-    die "没有找到 sshd。"
-fi
-ok "sshd：$SSHD_BIN"
-# ============================================================
-# 检测 SSH 配置文件
-# ============================================================
-for file in \
-    /etc/ssh/sshd_config \
-    /etc/sshd_config \
-    /usr/local/etc/sshd_config
+# ------------------------------------------------------------
+
+SSHD_BIN=""
+
+for bin in \
+    /usr/sbin/sshd \
+    /sbin/sshd \
+    "$(command -v sshd 2>/dev/null || true)"
 do
-    if [ -f "$file" ]; then
-        SSHD_CONFIG="$file"
+    if [[ -n "$bin" && -x "$bin" ]]; then
+        SSHD_BIN="$bin"
         break
     fi
 done
-if [ -z "$SSHD_CONFIG" ]; then
-    die "找不到 sshd_config。"
+
+if [[ -z "$SSHD_BIN" ]]; then
+    error "找不到 sshd。"
+    exit 1
 fi
-ok "SSH 配置：$SSHD_CONFIG"
-# ============================================================
+
+info "sshd：$SSHD_BIN"
+
+# ------------------------------------------------------------
+# SSH 配置文件
+# ------------------------------------------------------------
+
+SSHD_CONFIG="/etc/ssh/sshd_config"
+
+if [[ ! -f "$SSHD_CONFIG" ]]; then
+    error "SSH 配置文件不存在：$SSHD_CONFIG"
+    exit 1
+fi
+
+info "SSH 配置：$SSHD_CONFIG"
+
+# ------------------------------------------------------------
 # 检测 SSH 服务
-# ============================================================
-if [ "$INIT_SYSTEM" = "systemd" ]; then
-    for service in ssh sshd; do
-        if systemctl list-unit-files \
-            --type=service 2>/dev/null |
-            awk '{print $1}' |
-            grep -qx "${service}.service"
-        then
-            SSH_SERVICE="$service"
-            break
-        fi
-    done
-fi
-if [ "$INIT_SYSTEM" = "openrc" ]; then
-    for service in sshd ssh; do
-        if [ -f "/etc/init.d/$service" ]; then
-            SSH_SERVICE="$service"
-            break
-        fi
-    done
-fi
-if [ -z "$SSH_SERVICE" ]; then
-    if [ -f /etc/init.d/sshd ]; then
-        SSH_SERVICE="sshd"
-    elif [ -f /etc/init.d/ssh ]; then
+# ------------------------------------------------------------
+
+SSH_SERVICE=""
+
+if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+
+    if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.service'; then
         SSH_SERVICE="ssh"
+    elif systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then
+        SSH_SERVICE="sshd"
+    elif systemctl status ssh >/dev/null 2>&1; then
+        SSH_SERVICE="ssh"
+    elif systemctl status sshd >/dev/null 2>&1; then
+        SSH_SERVICE="sshd"
+    fi
+
+elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+
+    if rc-service ssh status >/dev/null 2>&1; then
+        SSH_SERVICE="ssh"
+    elif rc-service sshd status >/dev/null 2>&1; then
+        SSH_SERVICE="sshd"
     fi
 fi
-if [ -n "$SSH_SERVICE" ]; then
-    ok "SSH 服务：$SSH_SERVICE"
-else
+
+if [[ -z "$SSH_SERVICE" ]]; then
     warn "无法自动确定 SSH 服务名称。"
+else
+    info "SSH 服务：$SSH_SERVICE"
 fi
-# ============================================================
-# 获取当前 SSH 端口
-# ============================================================
-CURRENT_PORTS="$(
-    "$SSHD_BIN" -T 2>/dev/null |
-    awk '$1=="port" {print $2}' |
-    sort -n |
-    uniq |
-    tr '\n' ' '
-)"
-if [ -z "$CURRENT_PORTS" ]; then
-    CURRENT_PORTS="22"
-fi
-ok "当前 SSH 端口：$CURRENT_PORTS"
-info "脚本不会修改 SSH 端口。"
-# ============================================================
-# 创建 SSH 目录
-# ============================================================
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-# ============================================================
-# 更新 authorized_keys
-# ============================================================
-TMP_AUTHORIZED_KEYS="$(mktemp)"
-printf '%s\n' "$PUBLIC_KEY" > "$TMP_AUTHORIZED_KEYS"
-chmod 600 "$TMP_AUTHORIZED_KEYS"
-chown root:root "$TMP_AUTHORIZED_KEYS"
-mv "$TMP_AUTHORIZED_KEYS" "$AUTHORIZED_KEYS"
-chmod 600 "$AUTHORIZED_KEYS"
-chown root:root "$AUTHORIZED_KEYS"
-ok "Root SSH 公钥已更新"
-# ============================================================
-# 清理 SSH 配置
-# ============================================================
-clean_ssh_directives() {
-    local file="$1"
-    [ -f "$file" ] || return 0
-    sed -i -E \
-        '/^[[:space:]]*#?[[:space:]]*PubkeyAuthentication[[:space:]]+/d' \
-        "$file"
-    sed -i -E \
-        '/^[[:space:]]*#?[[:space:]]*PasswordAuthentication[[:space:]]+/d' \
-        "$file"
-    sed -i -E \
-        '/^[[:space:]]*#?[[:space:]]*KbdInteractiveAuthentication[[:space:]]+/d' \
-        "$file"
-    sed -i -E \
-        '/^[[:space:]]*#?[[:space:]]*ChallengeResponseAuthentication[[:space:]]+/d' \
-        "$file"
-    sed -i -E \
-        '/^[[:space:]]*#?[[:space:]]*PermitRootLogin[[:space:]]+/d' \
-        "$file"
-}
-# ============================================================
-# 清理主配置
-# ============================================================
-clean_ssh_directives "$SSHD_CONFIG"
-# ============================================================
-# 清理 sshd_config.d
-# ============================================================
-if [ -d /etc/ssh/sshd_config.d ]; then
-    while IFS= read -r -d '' file; do
-        clean_ssh_directives "$file"
-    done < <(
-        find /etc/ssh/sshd_config.d \
-            -type f \
-            \( -name "*.conf" -o -name "*.config" \) \
-            -print0 2>/dev/null
+
+# ------------------------------------------------------------
+# 检测当前 SSH 端口
+# ------------------------------------------------------------
+
+CURRENT_PORT=""
+
+if command -v sshd >/dev/null 2>&1; then
+    CURRENT_PORT=$(
+        "$SSHD_BIN" -T 2>/dev/null |
+        awk '$1 == "port" {print $2; exit}'
     )
 fi
-ok "冲突 SSH 配置已清理"
-# ============================================================
-# 安全配置
-# ============================================================
-SECURITY_CONFIG=$(cat <<'EOF'
+
+if [[ -z "$CURRENT_PORT" ]]; then
+    CURRENT_PORT="22"
+fi
+
+info "当前 SSH 端口：$CURRENT_PORT"
+echo "  脚本不会修改 SSH 端口。"
+
+# ------------------------------------------------------------
+# 检查公钥格式
+# ------------------------------------------------------------
+
+if ! printf '%s\n' "$PUBLIC_KEY" | grep -Eq \
+    '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) [A-Za-z0-9+/=]+([[:space:]].*)?$'
+then
+    error "PUBLIC_KEY 格式看起来不正确。"
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# SSH 目录
+# ------------------------------------------------------------
+
+mkdir -p /root/.ssh
+
+chmod 700 /root/.ssh
+chown root:root /root/.ssh
+
+# ------------------------------------------------------------
+# 更新 Root 公钥
+# ------------------------------------------------------------
+
+printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
+
+chmod 600 /root/.ssh/authorized_keys
+chown root:root /root/.ssh/authorized_keys
+
+info "Root SSH 公钥已更新"
+
+# ------------------------------------------------------------
+# 清理主配置中的冲突项
+#
+# 注意：
+# 不删除 Port
+# 不删除 Include
+# 不删除 Match
+# ------------------------------------------------------------
+
+TMP_CONFIG="$(mktemp)"
+
+awk '
+BEGIN {
+    IGNORECASE=1
+}
+
+# 删除这些全局 SSH 认证配置。
+# Port / Include / Match 等其他配置保持不动。
+
+/^[[:space:]]*PasswordAuthentication[[:space:]]+/ {
+    next
+}
+
+/^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+/ {
+    next
+}
+
+/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+/ {
+    next
+}
+
+/^[[:space:]]*PubkeyAuthentication[[:space:]]+/ {
+    next
+}
+
+/^[[:space:]]*PermitRootLogin[[:space:]]+/ {
+    next
+}
+
+{
+    print
+}
+' "$SSHD_CONFIG" > "$TMP_CONFIG"
+
+cat "$TMP_CONFIG" > "$SSHD_CONFIG"
+rm -f "$TMP_CONFIG"
+
+# ------------------------------------------------------------
+# 清理 sshd_config.d 中可能冲突的认证配置
+# ------------------------------------------------------------
+
+if [[ -d /etc/ssh/sshd_config.d ]]; then
+
+    while IFS= read -r -d '' file; do
+
+        TMP_FILE="$(mktemp)"
+
+        awk '
+        BEGIN {
+            IGNORECASE=1
+        }
+
+        /^[[:space:]]*PasswordAuthentication[[:space:]]+/ {
+            next
+        }
+
+        /^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+/ {
+            next
+        }
+
+        /^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+/ {
+            next
+        }
+
+        /^[[:space:]]*PubkeyAuthentication[[:space:]]+/ {
+            next
+        }
+
+        /^[[:space:]]*PermitRootLogin[[:space:]]+/ {
+            next
+        }
+
+        {
+            print
+        }
+        ' "$file" > "$TMP_FILE"
+
+        cat "$TMP_FILE" > "$file"
+        rm -f "$TMP_FILE"
+
+    done < <(find /etc/ssh/sshd_config.d \
+        -maxdepth 1 \
+        -type f \
+        \( -name '*.conf' -o -name '*.cfg' \) \
+        -print0 2>/dev/null)
+
+fi
+
+info "冲突 SSH 配置已清理"
+
+# ------------------------------------------------------------
+# 写入 SSH 安全配置
+#
+# 尽量写入主配置的 Match 之前。
+# ------------------------------------------------------------
+
+SECURITY_BLOCK='
 # ============================================================
 # VPS SSH Security
-# Managed by ssh-secure.sh
 # ============================================================
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
 PermitRootLogin prohibit-password
-EOF
-)
-# ============================================================
-# 处理 Match 块
-# ============================================================
-if grep -Eq '^[[:space:]]*Match([[:space:]]|$)' "$SSHD_CONFIG"; then
-    TMP_CONFIG="$(mktemp)"
-    awk -v security="$SECURITY_CONFIG" '
-        BEGIN {
-            inserted=0
-        }
-        !inserted && $0 ~ /^[[:space:]]*Match([[:space:]]|$)/ {
-            print security
-            print ""
-            inserted=1
-        }
-        {
-            print
-        }
-        END {
-            if (!inserted) {
-                print security
-            }
-        }
-    ' "$SSHD_CONFIG" > "$TMP_CONFIG"
-    chmod --reference="$SSHD_CONFIG" "$TMP_CONFIG" 2>/dev/null || true
-    chown --reference="$SSHD_CONFIG" "$TMP_CONFIG" 2>/dev/null || true
-    mv "$TMP_CONFIG" "$SSHD_CONFIG"
-else
-    printf '\n%s\n' "$SECURITY_CONFIG" >> "$SSHD_CONFIG"
-fi
-ok "SSH 安全配置已写入"
-# ============================================================
-# sshd 配置检查
-# ============================================================
-if ! "$SSHD_BIN" -t 2>/dev/null; then
-    error "sshd 配置检查失败。"
-    error "没有自动恢复，因为本脚本不创建备份。"
+'
+
+TMP_CONFIG="$(mktemp)"
+
+awk -v block="$SECURITY_BLOCK" '
+BEGIN {
+    inserted=0
+}
+
+# 在第一个 Match 之前写入全局配置
+/^[[:space:]]*Match([[:space:]]|$)/ && inserted == 0 {
+    printf "%s\n", block
+    inserted=1
+}
+
+{
+    print
+}
+
+END {
+    if (inserted == 0) {
+        printf "\n%s\n", block
+    }
+}
+' "$SSHD_CONFIG" > "$TMP_CONFIG"
+
+cat "$TMP_CONFIG" > "$SSHD_CONFIG"
+rm -f "$TMP_CONFIG"
+
+info "SSH 安全配置已写入"
+
+# ------------------------------------------------------------
+# SSH 配置语法检查
+# ------------------------------------------------------------
+
+if ! "$SSHD_BIN" -t 2>/tmp/sshd_test_error; then
+
+    error "sshd 配置语法检查失败。"
+
     echo
-    echo "请检查："
-    echo "    $SSHD_CONFIG"
-    echo
-    echo "以及："
-    echo "    /etc/ssh/sshd_config.d/"
-    echo
+    cat /tmp/sshd_test_error
+
+    rm -f /tmp/sshd_test_error
+
     exit 1
 fi
-ok "sshd 配置语法检查通过"
-# ============================================================
-# 获取最终实际生效配置
-# ============================================================
-EFFECTIVE_CONFIG="$(
-    "$SSHD_BIN" -T 2>/dev/null
-)"
-if [ -z "$EFFECTIVE_CONFIG" ]; then
-    die "无法获取 sshd 实际生效配置。"
+
+rm -f /tmp/sshd_test_error
+
+info "sshd 配置语法检查通过"
+
+# ------------------------------------------------------------
+# 获取实际生效配置
+# ------------------------------------------------------------
+
+EFFECTIVE_CONFIG="$("$SSHD_BIN" -T 2>/dev/null)"
+
+if [[ -z "$EFFECTIVE_CONFIG" ]]; then
+    error "无法获取 sshd 实际生效配置。"
+    exit 1
 fi
-# ============================================================
-# 提取最终配置
-# ============================================================
-FINAL_PUBKEY="$(
-    echo "$EFFECTIVE_CONFIG" |
-    awk '$1=="pubkeyauthentication" {print $2; exit}'
-)"
-FINAL_PASSWORD="$(
-    echo "$EFFECTIVE_CONFIG" |
-    awk '$1=="passwordauthentication" {print $2; exit}'
-)"
-FINAL_KBD="$(
-    echo "$EFFECTIVE_CONFIG" |
-    awk '$1=="kbdinteractiveauthentication" {print $2; exit}'
-)"
-FINAL_ROOT="$(
-    echo "$EFFECTIVE_CONFIG" |
-    awk '$1=="permitrootlogin" {print $2; exit}'
-)"
-# ============================================================
+
+PUBKEY_AUTH="$(printf '%s\n' "$EFFECTIVE_CONFIG" |
+    awk '$1=="pubkeyauthentication" {print $2; exit}')"
+
+PASSWORD_AUTH="$(printf '%s\n' "$EFFECTIVE_CONFIG" |
+    awk '$1=="passwordauthentication" {print $2; exit}')"
+
+KBD_AUTH="$(printf '%s\n' "$EFFECTIVE_CONFIG" |
+    awk '$1=="kbdinteractiveauthentication" {print $2; exit}')"
+
+PERMIT_ROOT="$(printf '%s\n' "$EFFECTIVE_CONFIG" |
+    awk '$1=="permitrootlogin" {print $2; exit}')"
+
+# ------------------------------------------------------------
 # 显示实际配置
-# ============================================================
+# ------------------------------------------------------------
+
 echo
 echo "--------------------------------------------"
 echo "SSH 实际生效配置"
 echo "--------------------------------------------"
-echo "PubkeyAuthentication:          $FINAL_PUBKEY"
-echo "PasswordAuthentication:       $FINAL_PASSWORD"
-echo "KbdInteractiveAuthentication: $FINAL_KBD"
-echo "PermitRootLogin:              $FINAL_ROOT"
+printf '%-32s%s\n' "PubkeyAuthentication:" "$PUBKEY_AUTH"
+printf '%-32s%s\n' "PasswordAuthentication:" "$PASSWORD_AUTH"
+printf '%-32s%s\n' "KbdInteractiveAuthentication:" "$KBD_AUTH"
+printf '%-32s%s\n' "PermitRootLogin:" "$PERMIT_ROOT"
 echo "--------------------------------------------"
+
+# ------------------------------------------------------------
+# 验证配置
+#
+# Debian 13 / OpenSSH 可能返回：
+#
+# prohibit-password
+# 或
+# without-password
+#
+# 两者实际含义一致。
+# ------------------------------------------------------------
+
+CONFIG_OK=true
+
+if [[ "$PUBKEY_AUTH" != "yes" ]]; then
+    error "PubkeyAuthentication 未正确设置。"
+    CONFIG_OK=false
+fi
+
+if [[ "$PASSWORD_AUTH" != "no" ]]; then
+    error "PasswordAuthentication 未正确设置。"
+    CONFIG_OK=false
+fi
+
+if [[ "$KBD_AUTH" != "no" ]]; then
+    error "KbdInteractiveAuthentication 未正确设置。"
+    CONFIG_OK=false
+fi
+
+if [[ "$PERMIT_ROOT" != "prohibit-password" &&
+      "$PERMIT_ROOT" != "without-password" ]]; then
+    error "PermitRootLogin 未正确设置。"
+    CONFIG_OK=false
+fi
+
+# ------------------------------------------------------------
+# 配置验证结果
+# ------------------------------------------------------------
+
+if [[ "$CONFIG_OK" != true ]]; then
+    echo
+    error "SSH 安全配置验证失败。"
+    echo
+    echo "当前实际配置："
+    echo "$EFFECTIVE_CONFIG" |
+        grep -Ei '^(port|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|permitrootlogin) '
+    echo
+    exit 1
+fi
+
 echo
-# ============================================================
-# 验证
-# ============================================================
-if [ "$FINAL_PUBKEY" != "yes" ]; then
-    die "PubkeyAuthentication 未正确生效。"
-fi
-if [ "$FINAL_PASSWORD" != "no" ]; then
-    die "PasswordAuthentication 未正确关闭。"
-fi
-if [ "$FINAL_KBD" != "no" ]; then
-    die "KbdInteractiveAuthentication 未正确关闭。"
-fi
-if [ "$FINAL_ROOT" != "prohibit-password" ]; then
-    die "PermitRootLogin 未正确设置。"
-fi
-ok "SSH 实际生效配置验证通过"
-# ============================================================
-# 验证 authorized_keys
-# ============================================================
-if [ ! -s "$AUTHORIZED_KEYS" ]; then
-    die "authorized_keys 为空。"
-fi
-if ! grep -Fqx "$PUBLIC_KEY" "$AUTHORIZED_KEYS"; then
-    die "authorized_keys 中没有找到当前公钥。"
-fi
-ok "当前公钥已确认写入 authorized_keys"
-# ============================================================
-# Reload SSH
-# ============================================================
-reload_ssh() {
-    # systemd
-    if [ "$INIT_SYSTEM" = "systemd" ] \
-        && [ -n "$SSH_SERVICE" ]; then
-        if systemctl reload "$SSH_SERVICE" 2>/dev/null; then
-            ok "SSH reload 成功"
-            return 0
-        fi
-        if systemctl restart "$SSH_SERVICE" 2>/dev/null; then
-            ok "SSH restart 成功"
-            return 0
+info "SSH 安全配置验证通过"
+
+# ------------------------------------------------------------
+# 重新加载 SSH
+# ------------------------------------------------------------
+
+if [[ "$INIT_SYSTEM" == "systemd" && -n "$SSH_SERVICE" ]]; then
+
+    if systemctl reload "$SSH_SERVICE" >/dev/null 2>&1; then
+        info "SSH 服务已重新加载"
+    else
+        warn "SSH reload 失败，尝试 restart"
+
+        if systemctl restart "$SSH_SERVICE" >/dev/null 2>&1; then
+            info "SSH 服务已重新启动"
+        else
+            error "SSH 服务重新启动失败。"
+            exit 1
         fi
     fi
-    # OpenRC
-    if [ "$INIT_SYSTEM" = "openrc" ] \
-        && [ -n "$SSH_SERVICE" ]; then
-        if rc-service "$SSH_SERVICE" reload 2>/dev/null; then
-            ok "SSH reload 成功"
-            return 0
-        fi
-        if rc-service "$SSH_SERVICE" restart 2>/dev/null; then
-            ok "SSH restart 成功"
-            return 0
-        fi
-    fi
-    # service
-    if command -v service >/dev/null 2>&1 \
-        && [ -n "$SSH_SERVICE" ]; then
-        if service "$SSH_SERVICE" reload 2>/dev/null; then
-            ok "SSH reload 成功"
-            return 0
-        fi
-        if service "$SSH_SERVICE" restart 2>/dev/null; then
-            ok "SSH restart 成功"
-            return 0
+
+elif [[ "$INIT_SYSTEM" == "openrc" && -n "$SSH_SERVICE" ]]; then
+
+    if rc-service "$SSH_SERVICE" reload >/dev/null 2>&1; then
+        info "SSH 服务已重新加载"
+    else
+        if rc-service "$SSH_SERVICE" restart >/dev/null 2>&1; then
+            info "SSH 服务已重新启动"
+        else
+            error "SSH 服务重新启动失败。"
+            exit 1
         fi
     fi
-    return 1
-}
-# ============================================================
-# 执行 Reload
-# ============================================================
-if [ -n "$SSH_SERVICE" ]; then
-    if ! reload_ssh; then
-        warn "SSH 配置有效，但无法自动 reload/restart SSH。"
-        warn "请手动检查 SSH 服务。"
-    fi
+
 else
-    warn "没有检测到 SSH 服务名称。"
-    warn "SSH 配置已经通过 sshd 检查。"
+    warn "未能自动重新加载 SSH 服务。"
+    warn "配置已经通过 sshd -t 检查，请手动 reload SSH。"
 fi
-# ============================================================
-# 完成
-# ============================================================
+
+# ------------------------------------------------------------
+# 最终检查
+# ------------------------------------------------------------
+
 echo
 echo "============================================"
-echo " SSH 安全配置完成"
+echo "          SSH 安全配置完成"
 echo "============================================"
 echo
-echo "系统：$OS_NAME"
-echo "SSH 配置：$SSHD_CONFIG"
-echo "SSH 服务：${SSH_SERVICE:-未知}"
-echo "SSH 端口：$CURRENT_PORTS"
-echo
-echo "公钥认证：已开启"
+echo "SSH 端口：$CURRENT_PORT"
+echo "Root 公钥：已更新"
 echo "密码登录：已关闭"
-echo "键盘交互：已关闭"
-echo "Root：仅允许公钥"
+echo "Keyboard-Interactive：已关闭"
+echo "Root 密码登录：已关闭"
+echo "Root 公钥登录：已启用"
+echo
+echo "PermitRootLogin 实际值：$PERMIT_ROOT"
+echo
+echo "注意："
+echo "1. 本脚本没有修改 SSH 端口。"
+echo "2. 本脚本没有创建备份。"
+echo "3. /root/.ssh/authorized_keys 已被新的公钥覆盖。"
+echo "4. 请确认新的 SSH 公钥登录已经可以正常使用。"
 echo
 echo "============================================"
-echo
-echo "请确认新私钥可以正常登录后，"
-echo "再关闭当前 SSH 会话。"
-echo
