@@ -13,7 +13,7 @@ set -e
 # 不做任何备份
 # ==============================
 
-PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOXNVMFwZalB4LCLyqRzrgBIvcmW3+tfQmD2qQsG5K3g"
+PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCoRpHB5f4boQ5BF7itCCpKaRtuz2dQ8U1zXqMjL94g 888"
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 AUTHORIZED_KEYS="/root/.ssh/authorized_keys"
