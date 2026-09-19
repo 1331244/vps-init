@@ -25,7 +25,8 @@ URL="\$BLACKLIST_URL"
 STATE_FILE=/var/lib/fail2ban-github-blacklist/applied.txt
 LOG_FILE=/var/log/fail2ban-github-blacklist.log
 tmp_file="\$(mktemp)"
-trap 'rm -f "\$tmp_file"' EXIT
+current_file="\$(mktemp)"
+trap 'rm -f "\$tmp_file" "\$current_file"' EXIT
 curl --fail --silent --show-error --location --max-time 30 "\$URL" -o "\$tmp_file"
 while IFS= read -r line || [[ -n "\$line" ]]; do
     line="\${line%%#*}"
@@ -36,11 +37,22 @@ while IFS= read -r line || [[ -n "\$line" ]]; do
         IFS=. read -r a b c d <<< "\$line"
         (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || continue
     fi
-    grep -Fxq "\$line" "\$STATE_FILE" && continue
-    echo "\$line" >> "\$STATE_FILE"
-    echo "\$(date -u +%FT%TZ) \$line" >> "\$LOG_FILE"
+    grep -Fxq "\$line" "\$current_file" && continue
+    echo "\$line" >> "\$current_file"
 done < "\$tmp_file"
-fail2ban-client reload >/dev/null
+
+while IFS= read -r old_ip; do
+    [[ -z "\$old_ip" ]] && continue
+    if ! grep -Fxq "\$old_ip" "\$current_file"; then
+        fail2ban-client set github-blacklist unbanip "\$old_ip" >/dev/null 2>&1 || true
+    fi
+done < "\$STATE_FILE"
+
+while IFS= read -r line; do
+    grep -Fxq "\$line" "\$STATE_FILE" && continue
+    echo "\$(date -u +%FT%TZ) \$line" >> "\$LOG_FILE"
+done < "\$current_file"
+mv "\$current_file" "\$STATE_FILE"
 SYNC
 chmod 0755 "$SYNC_SCRIPT"
 
