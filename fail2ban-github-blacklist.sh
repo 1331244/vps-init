@@ -52,9 +52,8 @@ BANACTION_LINE=""
 BASE_DIR=/var/lib/fail2ban-github-blacklist
 STATE_FILE="$BASE_DIR/applied.txt"
 SYNC_SCRIPT=/usr/local/sbin/fail2ban-github-blacklist-sync
-LOG_FILE=/var/log/fail2ban-github-blacklist.log
 install -d -m 0755 "$BASE_DIR"
-touch "$STATE_FILE" "$LOG_FILE"
+touch "$STATE_FILE"
 chmod 0600 "$STATE_FILE"
 
 cat > "$SYNC_SCRIPT" <<SYNC
@@ -62,7 +61,6 @@ cat > "$SYNC_SCRIPT" <<SYNC
 set -euo pipefail
 URL="\$BLACKLIST_URL"
 STATE_FILE=/var/lib/fail2ban-github-blacklist/applied.txt
-LOG_FILE=/var/log/fail2ban-github-blacklist.log
 tmp_file="\$(mktemp)"
 current_file="\$(mktemp)"
 trap 'rm -f "\$tmp_file" "\$current_file"' EXIT
@@ -89,7 +87,7 @@ done < "\$STATE_FILE"
 
 while IFS= read -r line; do
     grep -Fxq "\$line" "\$STATE_FILE" && continue
-    echo "\$(date -u +%FT%TZ) \$line" >> "\$LOG_FILE"
+    fail2ban-client set github-blacklist banip "\$line" >/dev/null 2>&1 || true
 done < "\$current_file"
 mv "\$current_file" "\$STATE_FILE"
 SYNC
@@ -104,7 +102,7 @@ cat > /etc/fail2ban/jail.d/github-blacklist.local <<EOF
 [github-blacklist]
 enabled = true
 filter = github-blacklist
-logpath = $LOG_FILE
+logpath = /dev/null
 $BANACTION_LINE
 maxretry = 1
 findtime = 10m
