@@ -11,6 +11,20 @@ fi
 command -v curl >/dev/null || { echo "缺少 curl，请先安装。" >&2; exit 1; }
 command -v fail2ban-client >/dev/null || { echo "缺少 fail2ban，请先安装。" >&2; exit 1; }
 
+if command -v nft >/dev/null 2>&1 && [[ -f /etc/fail2ban/action.d/nftables-multiport.conf ]]; then
+    BANACTION=nftables-multiport
+elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld && [[ -f /etc/fail2ban/action.d/firewallcmd-multiport.conf ]]; then
+    BANACTION=firewallcmd-multiport
+elif command -v iptables >/dev/null 2>&1 && [[ -f /etc/fail2ban/action.d/iptables-multiport.conf ]]; then
+    BANACTION=iptables-multiport
+elif command -v ufw >/dev/null 2>&1 && [[ -f /etc/fail2ban/action.d/ufw.conf ]]; then
+    BANACTION=ufw
+else
+    BANACTION=
+fi
+BANACTION_LINE=""
+[[ -n "$BANACTION" ]] && BANACTION_LINE="banaction = $BANACTION"
+
 BASE_DIR=/var/lib/fail2ban-github-blacklist
 STATE_FILE="$BASE_DIR/applied.txt"
 SYNC_SCRIPT=/usr/local/sbin/fail2ban-github-blacklist-sync
@@ -67,6 +81,7 @@ cat > /etc/fail2ban/jail.d/github-blacklist.local <<EOF
 enabled = true
 filter = github-blacklist
 logpath = $LOG_FILE
+$BANACTION_LINE
 maxretry = 1
 findtime = 10m
 bantime = -1
