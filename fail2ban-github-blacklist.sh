@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BLACKLIST_URL="${1:-${BLACKLIST_URL:-}}"
+DEFAULT_BLACKLIST_URL="https://raw.githubusercontent.com/1331244/vps-blacklist/main/blacklist.txt"
+BLACKLIST_URL="${1:-${BLACKLIST_URL:-$DEFAULT_BLACKLIST_URL}}"
 if [[ -z "$BLACKLIST_URL" ]]; then
-    echo "用法: sudo $0 <GitHub raw txt URL>" >&2
+    echo "用法: sudo $0 [GitHub raw txt URL]" >&2
     exit 2
 fi
 [[ "$EUID" -eq 0 ]] || { echo "请使用 root 权限运行。" >&2; exit 1; }
