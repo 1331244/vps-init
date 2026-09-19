@@ -1350,6 +1350,22 @@ change_ssh_port() {
 }
 
 # ============ 主逻辑 ============
+install_github_blacklist() {
+    local blacklist_installer="https://raw.githubusercontent.com/1331244/vps-init/main/fail2ban-github-blacklist.sh"
+    if ! command -v curl &>/dev/null; then
+        echo -e "${ERROR} 未检测到 curl，无法远程执行黑名单安装脚本。"
+        read -rp "按回车键返回主菜单..."
+        return
+    fi
+    echo -e "${INFO} 正在远程执行中央黑名单安装脚本..."
+    if curl -fsSL "$blacklist_installer" | $SUDO bash; then
+        echo -e "${INFO} ${GREEN}中央黑名单功能配置完成。${RESET}"
+    else
+        echo -e "${ERROR} 中央黑名单脚本执行失败。"
+    fi
+    read -rp "按回车键返回主菜单..."
+}
+
 detect_os; detect_pkg_mgr; detect_init; detect_ssh_log
 check_dependencies
 
@@ -1456,13 +1472,15 @@ while true; do
     echo -e " ${GREEN}4.${RESET} SSH 端口修改"
     echo -e " ${GREEN}0.${RESET} 退出脚本"
     echo -e "${CYAN}============================================================${RESET}"
-    read -rp "请输入选项 [0-4]: " choice
+    echo -e "  5. 中央黑名单防护"
+    read -rp "请输入选项 [0-5]: " choice
 
     case "$choice" in
         1) install_key_menu ;;
         2) toggle_password_login ;;
         3) manage_fail2ban_menu ;;
         4) change_ssh_port ;;
+        5) install_github_blacklist ;;
         0) echo -e "\n感谢使用！"; exit 0 ;;
         *) echo -e "${ERROR} 无效选项，请重新选择！"; sleep 1 ;;
     esac
