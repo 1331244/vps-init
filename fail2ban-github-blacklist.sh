@@ -9,7 +9,31 @@ if [[ -z "$BLACKLIST_URL" ]]; then
 fi
 [[ "$EUID" -eq 0 ]] || { echo "请使用 root 权限运行。" >&2; exit 1; }
 command -v curl >/dev/null || { echo "缺少 curl，请先安装。" >&2; exit 1; }
-command -v fail2ban-client >/dev/null || { echo "缺少 fail2ban，请先安装。" >&2; exit 1; }
+if ! command -v fail2ban-client >/dev/null 2>&1; then
+    read -r -p "未检测到 Fail2Ban，是否自动安装？[y/N] " install_fail2ban
+    if [[ "$install_fail2ban" =~ ^[Yy]$ ]]; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y fail2ban
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y fail2ban
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y fail2ban
+        elif command -v zypper >/dev/null 2>&1; then
+            zypper --non-interactive install fail2ban
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -Sy --noconfirm fail2ban
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache fail2ban
+        else
+            echo "无法识别包管理器，请手动安装 Fail2Ban。" >&2
+            exit 1
+        fi
+    else
+        echo "未安装 Fail2Ban，已取消配置。" >&2
+        exit 1
+    fi
+fi
+command -v fail2ban-client >/dev/null 2>&1 || { echo "Fail2Ban 安装失败，请手动检查。" >&2; exit 1; }
 
 if command -v nft >/dev/null 2>&1 && [[ -f /etc/fail2ban/action.d/nftables-multiport.conf ]]; then
     BANACTION=nftables-multiport
