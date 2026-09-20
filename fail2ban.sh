@@ -497,7 +497,7 @@ change_f2b_param() {
 
 menu_f2b_exponential() {
     while true; do
-        clear
+        f2b_clear
         local inc fac max
         inc=$(get_f2b_conf "bantime.increment")
         fac=$(get_f2b_conf "bantime.factor")
@@ -543,6 +543,10 @@ F2B_WHITELIST_FILE="/etc/fail2ban/jail.d/vps-init-whitelist.local"
 F2B_MANAGED_TAG="# Managed by vps-init fail2ban.sh"
 
 f2b_pause() { read -rp "按回车键继续..."; }
+f2b_clear() {
+    # 直接发送 ANSI 控制序列，兼容 TERM 未设置或系统没有 clear 命令的 SSH 会话。
+    printf '\033[H\033[2J\033[3J'
+}
 f2b_installed() { command -v fail2ban-client >/dev/null 2>&1; }
 validate_ipv4() {
     local ip=$1 IFS=. octets i
@@ -749,7 +753,7 @@ write_f2b_whitelist() {
 
 whitelist_f2b_menu() {
     while true; do
-        clear
+        f2b_clear
         local current; current=$(get_f2b_whitelist)
         echo -e "\n全局白名单（适用于所有 Jail）: ${YELLOW}${current}${RESET}\n  1. 添加 IP\n  2. 删除 IP\n  3. 查看白名单\n  0. 返回"
         read -rp "请选择 [0-3]: " opt
@@ -775,7 +779,7 @@ whitelist_f2b_menu() {
 
 ssh_f2b_menu() {
     while true; do
-        clear
+        f2b_clear
         echo -e "\n${BOLD}SSH 防护配置${RESET}\n  1. maxretry [$(get_f2b_conf maxretry)]\n  2. findtime [$(get_f2b_conf findtime)]\n  3. bantime [$(get_f2b_conf bantime)]\n  4. SSH Jail 开关\n  5. IP 白名单\n  6. 手动解封\n  7. 指数递增设置\n  0. 返回"
         read -rp "请选择 [0-7]: " opt
         case "$opt" in
@@ -923,7 +927,7 @@ delete_custom_rule() {
 view_custom_rules() { local jail file; for jail in $(list_custom_jails); do file=$(custom_jail_file "$jail"); echo -e "\n${CYAN}--- $jail ---${RESET}"; $SUDO sed -n '1,120p' "$file"; done; f2b_pause; }
 custom_rules_menu() {
     while true; do
-        clear
+        f2b_clear
         echo -e "\n${BOLD}自定义规则管理${RESET}\n  1. 创建自定义规则\n  2. 修改自定义规则\n  3. 删除自定义规则\n  4. 测试规则\n  5. 查看规则\n  0. 返回"
         read -rp "请选择 [0-5]: " opt
         case "$opt" in 1) write_custom_rule create ;; 2) edit_custom_rule ;; 3) delete_custom_rule ;; 4) test_custom_rule; f2b_pause ;; 5) view_custom_rules ;; 0) return ;; *) echo -e "${ERROR} 无效选项。";; esac
@@ -932,7 +936,7 @@ custom_rules_menu() {
 
 f2b_logs_menu() {
     while true; do
-        clear
+        f2b_clear
         echo -e "\n1. 查看最近日志\n2. 查看最近错误\n3. 查看传统日志\n4. 查看封禁/解封审计记录\n0. 返回"
         read -rp "请选择 [0-4]: " opt
         case "$opt" in
@@ -947,7 +951,7 @@ f2b_logs_menu() {
 
 f2b_service_menu() {
     while true; do
-        clear
+        f2b_clear
         echo -e "\n1. 启动\n2. 停止\n3. 重启\n4. 查看状态\n5. 设置开机启动\n6. 取消开机启动\n0. 返回"
         read -rp "请选择 [0-6]: " opt
         case "$opt" in
@@ -1001,7 +1005,7 @@ f2b_service_menu() {
 
 f2b_install_menu() {
     while true; do
-        clear
+        f2b_clear
         echo -e "\n1. 安装 / 检查 Fail2Ban\n2. 卸载 Fail2Ban\n0. 返回"
         read -rp "请选择 [0-2]: " opt
         case "$opt" in
@@ -1015,7 +1019,7 @@ f2b_install_menu() {
 # 完整管理入口；保留旧函数供 SSH 端口同步和状态面板调用。
 manage_fail2ban_menu() {
     while true; do
-        clear
+        f2b_clear
         echo -e "${CYAN}============================================================${RESET}"
         echo -e "${BOLD}${PURPLE}                     Fail2Ban 管理${RESET}"
         echo -e "${CYAN}============================================================${RESET}"
