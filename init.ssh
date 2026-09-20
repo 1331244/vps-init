@@ -754,6 +754,7 @@ done
 if [ -n "$CLI_PORT" ] || [ "$CLI_DISABLE_PWD" -eq 1 ]; then
 
     need_restart_sshd=0
+    need_sync_f2b_port=0
 
     # 1. 修改端口
     if [ -n "$CLI_PORT" ]; then
@@ -785,7 +786,7 @@ if [ -n "$CLI_PORT" ] || [ "$CLI_DISABLE_PWD" -eq 1 ]; then
         set_sshd_config "Port" "$CLI_PORT"
         need_restart_sshd=1
 
-        sync_f2b_ssh_port "$CLI_PORT"
+        need_sync_f2b_port=1
     fi
 
     # 2. 禁用密码登录（危险检查）
@@ -805,6 +806,9 @@ if [ -n "$CLI_PORT" ] || [ "$CLI_DISABLE_PWD" -eq 1 ]; then
     # 统一重启 SSH 服务
     if [ "$need_restart_sshd" -eq 1 ]; then
         if restart_sshd; then
+            if [ "$need_sync_f2b_port" -eq 1 ]; then
+                sync_f2b_ssh_port "$CLI_PORT"
+            fi
             if [ -n "$CLI_PORT" ]; then
                 if command -v ss &>/dev/null; then
                     echo -e "${INFO} 系统实际监听服务端口状态："

@@ -1,3 +1,15 @@
+#!/usr/bin/env bash
+
+# 本文件通常由 init.ssh source；直接执行时转交给同目录主脚本。
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    F2B_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -x "${F2B_SCRIPT_DIR}/init.ssh" ]; then
+        exec "${F2B_SCRIPT_DIR}/init.ssh" "$@"
+    fi
+    echo "无法找到可执行主脚本: ${F2B_SCRIPT_DIR}/init.ssh" >&2
+    exit 1
+fi
+
 JAIL_CONF="/etc/fail2ban/jail.local"
 LOG_FILE="/var/log/fail2ban.log"
 TARGET_JAIL="sshd"
@@ -95,18 +107,6 @@ set_f2b_conf() {
     fi
 }
 
-restart_f2b() {
-    echo -e "${INFO} 正在重载 Fail2Ban 配置..."
-    svc_restart fail2ban
-    for i in {1..5}; do
-        if fail2ban-client ping >/dev/null 2>&1; then
-            echo -e "${INFO} ${GREEN}成功！配置已生效。${RESET}"; return 0
-        fi; sleep 1
-    done
-    echo -e "${ERROR} Fail2Ban 重启超时或失败。"
-    echo -e "${YELLOW}请手动运行 'journalctl -u fail2ban -n 50' 排查错误。${RESET}"
-}
-
 get_fail2ban_status() {
     # 清命令缓存，否则 bash 会记住已被卸载的旧路径，
     # 导致 apt remove 后 command -v 仍返回旧路径、状态显示"已安装"。
@@ -167,7 +167,6 @@ maxretry = 5
 bantime = 600
 findtime = 3600
 banaction = ${banaction}
-ignoreip = 127.0.0.1/8
 EOF2
 }
 
@@ -337,7 +336,7 @@ check_f2b_install() {
                 echo -e "${WARN} 正在强制卸载 Fail2Ban..."
                 svc_stop fail2ban 2>/dev/null
                 svc_disable fail2ban 2>/dev/null
-                pkg_remove fail2ban
+                remove_f2b_package_preserve_config
                 # 兜底：apt 失败时直接用 dpkg 清（dpkg 数据库损坏场景）
                 hash -r 2>/dev/null
                 if command -v fail2ban-client &>/dev/null; then
@@ -346,9 +345,8 @@ check_f2b_install() {
                     $SUDO rm -f /var/lib/dpkg/info/fail2ban.* 2>/dev/null
                     hash -r 2>/dev/null
                 fi
-                $SUDO rm -r -- /etc/fail2ban
                 $SUDO rm -f /usr/bin/fail2ban-client /usr/bin/fail2ban-server /usr/local/bin/fail2ban-* 2>/dev/null
-                echo -e "${INFO} ${GREEN}Fail2Ban 已强制卸载。${RESET}"
+                echo -e "${INFO} ${GREEN}Fail2Ban 已强制卸载，/etc/fail2ban 配置已保留。${RESET}"
                 read -rp "按回车键返回..."
                 return 1
                 ;;
@@ -451,12 +449,19 @@ check_f2b_install() {
     return 0
 }
 
+remove_f2b_package_preserve_config() {
+    case "$PKG_MGR" in
+        apt) $SUDO apt-get remove -y fail2ban ;;
+        *) pkg_remove fail2ban ;;
+    esac
+}
+
 uninstall_f2b() {
     echo -e "\n${RED}${BOLD}警告：即将卸载 Fail2Ban 及其配置！${RESET}"
     read -rp "确认卸载吗？(y/N): " confirm
     [[ ! "$confirm" =~ ^[Yy]$ ]] && { echo -e "${INFO} 已取消卸载。"; read -rp "按回车键继续..."; return 1; }
     svc_stop fail2ban; svc_disable fail2ban
-    pkg_remove fail2ban
+    remove_f2b_package_preserve_config
     # 清 bash 命令缓存：否则 command -v 仍返回已删除的旧路径，
     # 导致卸载后状态仍显示"已安装 / 已停止"。
     hash -r 2>/dev/null
@@ -469,9 +474,7 @@ uninstall_f2b() {
     # 再兜底：物理删除可能的二进制残留
     $SUDO rm -f /usr/bin/fail2ban-client /usr/bin/fail2ban-server /usr/local/bin/fail2ban-* 2>/dev/null
     hash -r 2>/dev/null
-    read -rp "是否同时删除配置目录 /etc/fail2ban ？(y/N): " del_conf
-    [[ "$del_conf" =~ ^[Yy]$ ]] && { $SUDO rm -r -- /etc/fail2ban; echo -e "${INFO} 已删除 /etc/fail2ban"; }
-    echo -e "${INFO} ${GREEN}Fail2Ban 卸载完成。${RESET}"; read -rp "按回车键继续..."
+    echo -e "${INFO} ${GREEN}Fail2Ban 卸载完成，/etc/fail2ban 配置已保留。${RESET}"; read -rp "按回车键继续..."
     return 0
 }
 
@@ -490,78 +493,6 @@ change_f2b_param() {
         echo -e "${ERROR} 格式错误，请重试。"
     done
     set_f2b_conf "$key" "$new_val"; restart_f2b
-}
-
-toggle_f2b_service() {
-    echo -e "\n${CYAN}------------------- 服务开关 -------------------${RESET}"
-    if fail2ban-client ping >/dev/null 2>&1; then
-        read -rp "是否停止并禁用 Fail2Ban? (y/N): " confirm
-        [[ "$confirm" =~ ^[Yy]$ ]] && { svc_stop fail2ban; svc_disable fail2ban; echo -e "${WARN} 服务已停止。${RESET}"; }
-    else
-        read -rp "是否启用并启动 Fail2Ban? (y/N): " confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            svc_enable fail2ban; svc_start fail2ban
-            for i in {1..5}; do
-                if fail2ban-client ping >/dev/null 2>&1; then echo -e "${INFO} ${GREEN}服务已成功启动。${RESET}"; read -rp "按回车键继续..."; return; fi; sleep 1
-            done
-            echo -e "${ERROR} 启动失败或超时。"
-        fi
-    fi
-    read -rp "按回车键继续..."
-}
-
-unban_f2b_ip() {
-    echo -e "\n${CYAN}------------------ 手动解封 IP ------------------${RESET}"
-    local banned_list
-    banned_list=$(fail2ban-client status "$TARGET_JAIL" 2>/dev/null | grep "Banned IP list" | awk -F':' '{print $2}' | sed 's/^[ \t]*//')
-    [ -z "$banned_list" ] && banned_list="无"
-    echo -e "当前被封禁列表: ${YELLOW}${banned_list}${RESET}"
-    read -rp "输入要解封的 IP (留空取消): " target_ip; [ -z "$target_ip" ] && return
-    $SUDO fail2ban-client set "$TARGET_JAIL" unbanip "$target_ip"
-    [ $? -eq 0 ] && echo -e "${INFO} ${GREEN}解封成功: $target_ip${RESET}" || echo -e "${ERROR} 操作失败。"
-    read -rp "按回车键继续..."
-}
-
-add_f2b_whitelist() {
-    echo -e "\n${CYAN}------------------ 白名单管理 ------------------${RESET}"
-    local current_list; current_list=$(get_f2b_conf "ignoreip")
-    echo -e "当前白名单: ${YELLOW}${current_list:-继承全局或无}${RESET}"
-    local current_ip; current_ip=$(echo "$SSH_CLIENT" | awk '{print $1}')
-    read -rp "输入要放行的 IP (回车默认当前连接 IP: ${current_ip:-无}): " input_ip
-    [ -z "$input_ip" ] && input_ip="$current_ip"
-    [ -z "$input_ip" ] && echo -e "${ERROR} 无法获取 IP。" && return
-    if echo "$current_list" | grep -Fq "$input_ip"; then
-        echo -e "${WARN} 该 IP 已在白名单中。"
-    else
-        if [ -z "$current_list" ]; then set_f2b_conf "ignoreip" "$input_ip"
-        else set_f2b_conf "ignoreip" "$current_list $input_ip"; fi
-        restart_f2b
-    fi
-    read -rp "按回车键继续..."
-}
-
-view_f2b_logs() {
-    clear
-    echo -e "${CYAN}============================================================${RESET}"
-    echo -e "${BOLD}${PURPLE}                 Fail2Ban 审计日志 (最近 20 条)${RESET}"
-    echo -e "${CYAN}============================================================${RESET}"
-    if [ ! -f "$LOG_FILE" ]; then
-        echo -e "${WARN} 日志文件不存在: $LOG_FILE"
-    else
-        local out
-        out=$(grep -E "(Ban|Unban)" "$LOG_FILE" 2>/dev/null | tail -n 20)
-        if [ -z "$out" ]; then
-            echo -e "${WARN} 暂无封禁/解封记录${RESET}"
-        else
-            echo "$out" | awk '{
-                gsub(/Unban/, "\033[32m&\033[0m");
-                gsub(/Ban/, "\033[31m&\033[0m");
-                print
-            }'
-        fi
-    fi
-    echo -e "${CYAN}============================================================${RESET}"
-    read -rp "按回车键返回..."
 }
 
 menu_f2b_exponential() {
@@ -595,57 +526,11 @@ menu_f2b_exponential() {
     done
 }
 
-manage_fail2ban_menu() {
-    if ! check_f2b_install; then read -rp "按回车键返回主菜单..."; return; fi
-    while true; do
-        clear
-        VAL_MAX=$(get_f2b_conf "maxretry"); VAL_BAN=$(get_f2b_conf "bantime"); VAL_FIND=$(get_f2b_conf "findtime")
-        echo -e "${CYAN}============================================================${RESET}"
-        echo -e "${BOLD}${PURPLE}                     Fail2Ban 防护管理${RESET}"
-        echo -e "${CYAN}============================================================${RESET}"
-        echo -e "  服务状态: $(get_fail2ban_status)"
-        echo -e "${CYAN}------------------------------------------------------------${RESET}"
-        echo -e "  ${GREEN}1.${RESET} 最大重试次数     [${YELLOW}${VAL_MAX:-默认}${RESET}]"
-        echo -e "  ${GREEN}2.${RESET} 初始封禁时长     [${YELLOW}${VAL_BAN:-默认}${RESET}]$(fmt_f2b_unit "$VAL_BAN" "time")"
-        echo -e "  ${GREEN}3.${RESET} 监测时间窗口     [${YELLOW}${VAL_FIND:-默认}${RESET}]$(fmt_f2b_unit "$VAL_FIND" "time")"
-        echo -e "${CYAN}------------------------------------------------------------${RESET}"
-        echo -e "  ${GREEN}4.${RESET} 手动解封 IP"
-        echo -e "  ${GREEN}5.${RESET} 添加 IP 白名单"
-        echo -e "  ${GREEN}6.${RESET} 查看封禁日志 (最近20条)"
-        echo -e "  ${GREEN}7.${RESET} 指数递增封禁设置 ->"
-        echo -e "${CYAN}------------------------------------------------------------${RESET}"
-        echo -e "  ${GREEN}8.${RESET} 启用 / 停止 服务"
-        echo -e "  ${GREEN}9.${RESET} 卸载 Fail2Ban"
-        echo -e "  ${GREEN}0.${RESET} 返回主菜单"
-        echo -e "${CYAN}============================================================${RESET}"
-        read -rp "请选择 [0-9]: " choice
-        case "$choice" in
-            1) change_f2b_param "最大重试次数" "maxretry" "int" ;;
-            2) change_f2b_param "初始封禁时长" "bantime" "time" ;;
-            3) change_f2b_param "监测时间窗口" "findtime" "time" ;;
-            4) unban_f2b_ip ;;
-            5) add_f2b_whitelist ;;
-            6) view_f2b_logs ;;
-            7) menu_f2b_exponential ;;
-            8) toggle_f2b_service ;;
-            9) # 卸载后根据返回值决定是否返回主菜单：
-               #   uninstall_f2b 返回 0 = 卸载完成 → 返回主菜单
-               #   uninstall_f2b 返回 1 = 用户取消 → 留在本菜单
-               if uninstall_f2b; then
-                   return
-               fi
-               ;;
-            0) return ;;
-            *) echo -e "${ERROR} 无效选项！"; sleep 1 ;;
-        esac
-    done
-}
-
 sync_f2b_ssh_port() {
     local port=$1
     [ -f "$JAIL_CONF" ] && grep -q "^\[${TARGET_JAIL}\]" "$JAIL_CONF" || return 0
     set_f2b_conf port "$port"
-    if f2b_installed && fail2ban-client ping >/dev/null 2>&1; then
+    if f2b_installed; then
         echo -e "${INFO} 正在同步更新 Fail2Ban 防护端口..."
         reload_f2b_checked
     fi
@@ -672,10 +557,14 @@ validate_log_path() { [[ "$1" == /* ]] && [[ "$1" != *$'\n'* ]] && [[ "$1" != *'
 validate_banaction() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]; }
 
 detect_f2b_banaction() {
-    if command -v nft >/dev/null 2>&1; then echo "nftables-allports"
-    elif command -v iptables >/dev/null 2>&1; then echo "iptables-allports"
+    if command -v nft >/dev/null 2>&1 && f2b_action_exists "nftables-allports"; then echo "nftables-allports"
+    elif command -v iptables >/dev/null 2>&1 && f2b_action_exists "iptables-allports"; then echo "iptables-allports"
     else return 1
     fi
+}
+
+f2b_action_exists() {
+    [ -f "/etc/fail2ban/action.d/$1.conf" ] || [ -f "/etc/fail2ban/action.d/$1.local" ]
 }
 
 test_f2b_config() {
@@ -683,7 +572,7 @@ test_f2b_config() {
     echo -e "${INFO} 正在测试 Fail2Ban 配置..."
     output=$($SUDO fail2ban-client -t 2>&1); local rc=$?
     echo "$output"
-    if [ "$rc" -ne 0 ] || ! echo "$output" | grep -qi "configuration test is successful"; then
+    if [ "$rc" -ne 0 ]; then
         echo -e "${ERROR} 配置测试失败，未重载或重启服务。"
         return 1
     fi
@@ -769,7 +658,7 @@ ban_f2b_ip() {
     validate_ipv4 "$ip" || { echo -e "${ERROR} IPv4 格式无效。"; f2b_pause; return; }
     current_ip=${SSH_CLIENT%% *}
     if [ -n "$current_ip" ] && [ "$ip" = "$current_ip" ]; then
-        echo -e "${ERROR} 拒绝封禁当前 SSH 管理 IP。请先将其加入白名单。"; f2b_pause; return
+        echo -e "${ERROR} 为防止 SSH 断连，拒绝封禁当前管理 IP。"; f2b_pause; return
     fi
     read -rp "确认在 [$jail] 永久封禁 $ip？(y/N): " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || return
@@ -794,24 +683,72 @@ unban_f2b_ip() {
     f2b_pause
 }
 
+get_f2b_whitelist() {
+    local managed ssh_list
+    managed=$(awk -F= '/^[[:space:]]*ignoreip[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,""); print; exit}' "$F2B_WHITELIST_FILE" 2>/dev/null)
+    if [ -n "$managed" ]; then
+        printf '%s\n' "127.0.0.1/8 $managed"
+    else
+        ssh_list=$(get_f2b_conf ignoreip)
+        printf '%s\n' "127.0.0.1/8 $ssh_list"
+    fi | awk '{for(i=1;i<=NF;i++) if(!seen[$i]++) printf "%s%s", sep, $i; sep=" "} END{print ""}'
+}
+
+write_f2b_whitelist() {
+    local list=$1 tmp backup="" jail rc
+    tmp=$(mktemp)
+    {
+        echo "$F2B_MANAGED_TAG"
+        echo "[DEFAULT]"
+        echo "ignoreip = $list"
+        echo ""
+        # sshd 的旧配置可能有 Jail 级 ignoreip，必须显式覆盖才能让白名单生效。
+        echo "[$TARGET_JAIL]"
+        echo "ignoreip = $list"
+        for jail in $(list_custom_jails); do
+            echo ""
+            echo "[$jail]"
+            echo "ignoreip = $list"
+        done
+    } > "$tmp"
+    if [ -f "$F2B_WHITELIST_FILE" ]; then
+        backup=$(mktemp); $SUDO cp "$F2B_WHITELIST_FILE" "$backup"
+    fi
+    $SUDO mkdir -p "$F2B_JAIL_DIR"
+    $SUDO cp "$tmp" "$F2B_WHITELIST_FILE"; rm -f "$tmp"
+    if ! test_f2b_config; then
+        if [ -n "$backup" ]; then $SUDO cp "$backup" "$F2B_WHITELIST_FILE"
+        else $SUDO rm -f -- "$F2B_WHITELIST_FILE"; fi
+        rm -f "$backup"
+        echo -e "${ERROR} 白名单配置已回滚。"
+        return 1
+    fi
+    rm -f "$backup"
+    if fail2ban-client ping >/dev/null 2>&1; then
+        $SUDO fail2ban-client reload && echo -e "${INFO} ${GREEN}白名单已生效。${RESET}"
+    else
+        echo -e "${WARN} 配置测试通过；服务未运行，将在下次启动时生效。"
+    fi
+}
+
 whitelist_f2b_menu() {
     while true; do
-        local current
-        current=$(awk -F= '/^[[:space:]]*ignoreip[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,""); print; exit}' "$F2B_WHITELIST_FILE" 2>/dev/null)
-        current=${current:-127.0.0.1/8}
+        local current; current=$(get_f2b_whitelist)
         echo -e "\n全局白名单（适用于所有 Jail）: ${YELLOW}${current}${RESET}\n  1. 添加 IP\n  2. 删除 IP\n  3. 查看白名单\n  0. 返回"
         read -rp "请选择 [0-3]: " opt
         case "$opt" in
             1) local ip=${SSH_CLIENT%% *}; read -rp "输入 IPv4（默认当前 SSH IP: ${ip:-无}）: " input; input=${input:-$ip}
                validate_ipv4 "$input" || { echo -e "${ERROR} IPv4 格式无效。"; continue; }
                if ! echo " $current " | grep -qwF "$input"; then
-                   printf '%s\n[DEFAULT]\nignoreip = %s %s\n' "$F2B_MANAGED_TAG" "$current" "$input" | $SUDO tee "$F2B_WHITELIST_FILE" >/dev/null
+                   write_f2b_whitelist "$current $input"
                fi
-               reload_f2b_checked; f2b_pause ;;
+               f2b_pause ;;
             2) read -rp "输入要删除的 IPv4: " ip; validate_ipv4 "$ip" || { echo -e "${ERROR} IPv4 格式无效。"; continue; }
+               if [ -n "${SSH_CLIENT%% *}" ] && [ "$ip" = "${SSH_CLIENT%% *}" ]; then
+                   echo -e "${ERROR} 拒绝删除当前 SSH 管理 IP 的白名单，以免当前会话被自动封禁。"; f2b_pause; continue
+               fi
                local next="" item; for item in $current; do [ "$item" = "$ip" ] || next="${next:+$next }$item"; done
-               printf '%s\n[DEFAULT]\nignoreip = %s\n' "$F2B_MANAGED_TAG" "${next:-127.0.0.1/8}" | $SUDO tee "$F2B_WHITELIST_FILE" >/dev/null
-               reload_f2b_checked; f2b_pause ;;
+               write_f2b_whitelist "${next:-127.0.0.1/8}"; f2b_pause ;;
             3) f2b_pause ;;
             0) return ;;
             *) echo -e "${ERROR} 无效选项。" ;;
@@ -845,8 +782,20 @@ list_custom_jails() {
 }
 read_jail_value() { awk -F= -v k="$2" '$1 ~ "^[[:space:]]*" k "[[:space:]]*$"{sub(/^[^=]*=[[:space:]]*/,""); print; exit}' "$1"; }
 
+run_f2b_regex() {
+    local log=$1 filter_file=$2 output rc
+    output=$($SUDO fail2ban-regex "$log" "$filter_file" 2>&1); rc=$?
+    echo "$output"
+    echo -e "${CYAN}测试摘要：${RESET}"
+    echo "$output" | grep -E "Lines:|matched|missed|ignored|Failregex:|Ignoreregex:" | tail -n 12
+    if [ "$rc" -eq 0 ] && echo "$output" | grep -Eq "[1-9][0-9]* matched|Failregex:[[:space:]]+[1-9]"; then
+        echo -e "${INFO} ${GREEN}规则测试成功且存在匹配。${RESET}"; return 0
+    fi
+    echo -e "${ERROR} 规则测试未通过或没有匹配日志，请检查语法、日志格式与路径。"; return 1
+}
+
 test_custom_rule() {
-    local jail=${1:-} file filter log output
+    local jail=${1:-} file filter log filter_file
     if [ -z "$jail" ]; then
         echo -e "已有自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"
         read -rp "输入 Jail 名称: " jail
@@ -855,21 +804,15 @@ test_custom_rule() {
     file=$(custom_jail_file "$jail"); [ -f "$file" ] || { echo -e "${ERROR} 找不到该自定义 Jail。"; return 1; }
     filter=$(read_jail_value "$file" filter); log=$(read_jail_value "$file" logpath)
     [ -f "$log" ] || { echo -e "${ERROR} 日志文件不存在: $log"; return 1; }
-    local filter_file; filter_file=$(custom_filter_file "$filter")
+    filter_file=$(custom_filter_file "$filter")
     [ -f "$filter_file" ] || filter_file="$F2B_FILTER_DIR/${filter}.conf"
     [ -f "$filter_file" ] || { echo -e "${ERROR} Filter 文件不存在。"; return 1; }
-    output=$($SUDO fail2ban-regex "$log" "$filter_file" 2>&1); local rc=$?
-    echo "$output"
-    echo -e "${CYAN}测试摘要：${RESET}"
-    echo "$output" | grep -E "Lines:|matched|missed|ignored|Failregex:|Ignoreregex:" | tail -n 12
-    if [ "$rc" -eq 0 ] && echo "$output" | grep -Eq "[1-9][0-9]* matched|Failregex: [1-9]"; then
-        echo -e "${INFO} ${GREEN}规则测试成功且存在匹配。${RESET}"; return 0
-    fi
-    echo -e "${ERROR} 规则测试未通过或没有匹配日志，请检查语法、日志格式与路径。"; return 1
+    run_f2b_regex "$log" "$filter_file"
 }
 
 write_custom_rule() {
     local mode=$1 jail=${2:-} old_jail=$2 old_file filter log maxretry findtime bantime action regex jail_tmp filter_tmp
+    local jail_file filter_file jail_backup="" filter_backup="" whitelist
     [ "$mode" = edit ] && old_file=$(custom_jail_file "$old_jail")
     if [ "$mode" = create ]; then read -rp "Jail 名称: " jail
     else echo -e "正在修改 Jail: ${YELLOW}$jail${RESET}"; fi
@@ -889,33 +832,66 @@ write_custom_rule() {
     daction=${daction:-$(detect_f2b_banaction)} || { echo -e "${ERROR} 未发现 nft 或 iptables，无法创建可工作的封禁规则。"; return; }
     read -rp "banaction（自动选择: $daction，回车接受）: " action; action=${action:-$daction}
     validate_f2b_name "$filter" && validate_log_path "$log" && [[ "$maxretry" =~ ^[1-9][0-9]*$ ]] && validate_time "$findtime" && { [ "$bantime" = -1 ] || validate_time "$bantime"; } && validate_banaction "$action" || { echo -e "${ERROR} 参数格式无效。"; return; }
+    if [ -f "$F2B_FILTER_DIR/${filter}.conf" ]; then
+        echo -e "${ERROR} Filter 名称与系统 Filter 冲突，请使用唯一名称: $filter"
+        return
+    fi
+    f2b_action_exists "$action" || { echo -e "${ERROR} Fail2Ban action 不存在: $action"; return; }
     echo -e "${CYAN}请输入 failregex（必须包含 <HOST>，单行；留空保留现有 Filter）:${RESET}"
     read -r regex
     filter_tmp=$(mktemp); jail_tmp=$(mktemp)
     if [ -z "$regex" ] && [ -f "$(custom_filter_file "$dfilter")" ]; then cp "$(custom_filter_file "$dfilter")" "$filter_tmp"
     elif [[ "$regex" == *'<HOST>'* ]]; then printf '%s\n%s\n%s\n' "$F2B_MANAGED_TAG" '[Definition]' "failregex = $regex" > "$filter_tmp"
     else echo -e "${ERROR} failregex 必须包含 <HOST>。"; rm -f "$filter_tmp" "$jail_tmp"; return; fi
-    printf '%s\n[%s]\nenabled = true\nfilter = %s\nlogpath = %s\nmaxretry = %s\nfindtime = %s\nbantime = %s\nbantime.increment = false\nbanaction = %s\n' "$F2B_MANAGED_TAG" "$jail" "$filter" "$log" "$maxretry" "$findtime" "$bantime" "$action" > "$jail_tmp"
+    whitelist=$(get_f2b_whitelist)
+    printf '%s\n[%s]\nenabled = true\nfilter = %s\nlogpath = %s\nmaxretry = %s\nfindtime = %s\nbantime = %s\nbantime.increment = false\nbanaction = %s\nignoreip = %s\n' "$F2B_MANAGED_TAG" "$jail" "$filter" "$log" "$maxretry" "$findtime" "$bantime" "$action" "$whitelist" > "$jail_tmp"
+    # 在触碰正式配置前先验证实际日志和候选 Filter。
+    run_f2b_regex "$log" "$filter_tmp" || { rm -f "$jail_tmp" "$filter_tmp"; return; }
+    jail_file=$(custom_jail_file "$jail"); filter_file=$(custom_filter_file "$filter")
+    [ -f "$jail_file" ] && { jail_backup=$(mktemp); $SUDO cp "$jail_file" "$jail_backup"; }
+    [ -f "$filter_file" ] && { filter_backup=$(mktemp); $SUDO cp "$filter_file" "$filter_backup"; }
     $SUDO mkdir -p "$F2B_JAIL_DIR" "$F2B_FILTER_DIR"
-    $SUDO cp "$jail_tmp" "$(custom_jail_file "$jail")"; $SUDO cp "$filter_tmp" "$(custom_filter_file "$filter")"
+    $SUDO cp "$jail_tmp" "$jail_file"; $SUDO cp "$filter_tmp" "$filter_file"
     rm -f "$jail_tmp" "$filter_tmp"
-    if ! test_custom_rule "$jail"; then echo -e "${WARN} 文件已保存，但规则测试未通过，未重载 Fail2Ban。"; return; fi
-    reload_f2b_checked
+    if ! test_f2b_config; then
+        if [ -n "$jail_backup" ]; then $SUDO cp "$jail_backup" "$jail_file"; else $SUDO rm -f -- "$jail_file"; fi
+        if [ -n "$filter_backup" ]; then $SUDO cp "$filter_backup" "$filter_file"; else $SUDO rm -f -- "$filter_file"; fi
+        rm -f "$jail_backup" "$filter_backup"
+        echo -e "${ERROR} 配置测试失败，Jail 和 Filter 已回滚。"
+        return 1
+    fi
+    rm -f "$jail_backup" "$filter_backup"
+    if fail2ban-client ping >/dev/null 2>&1; then $SUDO fail2ban-client reload
+    else echo -e "${WARN} 配置测试通过；服务未运行，将在下次启动时生效。"; fi
 }
 
 edit_custom_rule() { local jail; echo -e "自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"; read -rp "输入要修改的 Jail: " jail; [ -f "$(custom_jail_file "$jail")" ] && write_custom_rule edit "$jail" || echo -e "${ERROR} Jail 不存在。"; }
 delete_custom_rule() {
-    local jail file filter filter_file refs
+    local jail file filter filter_file refs jail_backup filter_backup="" remove_filter=0
     echo -e "自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"; read -rp "输入要删除的 Jail: " jail
     validate_f2b_name "$jail" && [ "$jail" != sshd ] || { echo -e "${ERROR} 名称无效。"; return; }
     file=$(custom_jail_file "$jail"); [ -f "$file" ] && grep -qFx "$F2B_MANAGED_TAG" "$file" || { echo -e "${ERROR} 不是本脚本管理的 Jail，拒绝删除。"; return; }
     filter=$(read_jail_value "$file" filter); filter_file=$(custom_filter_file "$filter")
     echo -e "将删除 Jail: ${RED}$jail${RESET}\n配置: $file\nFilter: $filter_file"
     read -rp "确认删除？(y/N): " confirm; [[ "$confirm" =~ ^[Yy]$ ]] || return
+    jail_backup=$(mktemp); $SUDO cp "$file" "$jail_backup"
     $SUDO rm -f -- "$file"
-    refs=$(grep -RslE "^[[:space:]]*filter[[:space:]]*=[[:space:]]*${filter}[[:space:]]*$" "$F2B_JAIL_DIR" 2>/dev/null | wc -l)
-    if [ "$refs" -eq 0 ] && [ -f "$filter_file" ] && grep -qFx "$F2B_MANAGED_TAG" "$filter_file"; then $SUDO rm -f -- "$filter_file"; fi
-    reload_f2b_checked
+    refs=$(grep -RslE "^[[:space:]]*filter[[:space:]]*=[[:space:]]*${filter}[[:space:]]*$" \
+        /etc/fail2ban/jail.conf /etc/fail2ban/jail.local "$F2B_JAIL_DIR" 2>/dev/null | wc -l)
+    if [ "$refs" -eq 0 ] && [ -f "$filter_file" ] && grep -qFx "$F2B_MANAGED_TAG" "$filter_file"; then
+        filter_backup=$(mktemp); $SUDO cp "$filter_file" "$filter_backup"
+        $SUDO rm -f -- "$filter_file"; remove_filter=1
+    fi
+    if ! test_f2b_config; then
+        $SUDO cp "$jail_backup" "$file"
+        [ "$remove_filter" -eq 1 ] && $SUDO cp "$filter_backup" "$filter_file"
+        rm -f "$jail_backup" "$filter_backup"
+        echo -e "${ERROR} 删除后的配置测试失败，Jail 和 Filter 已恢复。"
+        return 1
+    fi
+    rm -f "$jail_backup" "$filter_backup"
+    if fail2ban-client ping >/dev/null 2>&1; then $SUDO fail2ban-client reload
+    else echo -e "${WARN} 配置测试通过；服务未运行，删除将在下次启动时生效。"; fi
 }
 view_custom_rules() { local jail file; for jail in $(list_custom_jails); do file=$(custom_jail_file "$jail"); echo -e "\n${CYAN}--- $jail ---${RESET}"; $SUDO sed -n '1,120p' "$file"; done; f2b_pause; }
 custom_rules_menu() {
@@ -928,12 +904,13 @@ custom_rules_menu() {
 
 f2b_logs_menu() {
     while true; do
-        echo -e "\n1. 查看最近日志\n2. 查看最近错误\n3. 查看传统日志\n0. 返回"
-        read -rp "请选择 [0-3]: " opt
+        echo -e "\n1. 查看最近日志\n2. 查看最近错误\n3. 查看传统日志\n4. 查看封禁/解封审计记录\n0. 返回"
+        read -rp "请选择 [0-4]: " opt
         case "$opt" in
             1) if command -v journalctl >/dev/null; then $SUDO journalctl -u fail2ban -n 80 --no-pager; elif [ -f "$LOG_FILE" ]; then tail -n 80 "$LOG_FILE"; fi; f2b_pause ;;
             2) if command -v journalctl >/dev/null; then $SUDO journalctl -u fail2ban -p err -n 80 --no-pager; elif [ -f "$LOG_FILE" ]; then grep -Ei 'error|fail|fatal' "$LOG_FILE" | tail -n 80; fi; f2b_pause ;;
             3) [ -f "$LOG_FILE" ] && tail -n 80 "$LOG_FILE" || echo -e "${WARN} $LOG_FILE 不存在。"; f2b_pause ;;
+            4) if [ -f "$LOG_FILE" ]; then grep -E '(Ban|Unban)' "$LOG_FILE" | tail -n 20; else echo -e "${WARN} $LOG_FILE 不存在。"; fi; f2b_pause ;;
             0) return ;; *) echo -e "${ERROR} 无效选项。" ;;
         esac
     done
