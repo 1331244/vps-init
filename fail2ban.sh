@@ -780,7 +780,7 @@ whitelist_f2b_menu() {
 ssh_f2b_menu() {
     while true; do
         f2b_clear
-        echo -e "\n${BOLD}SSH 防护配置${RESET}\n  1. maxretry [$(get_f2b_conf maxretry)]\n  2. findtime [$(get_f2b_conf findtime)]\n  3. bantime [$(get_f2b_conf bantime)]\n  4. SSH Jail 开关\n  5. IP 白名单\n  6. 手动解封\n  7. 指数递增设置\n  0. 返回"
+        echo -e "\n${BOLD}SSH 防护配置${RESET}\n  1. 最大重试次数 [$(get_f2b_conf maxretry)]\n  2. 检测时间窗口 [$(get_f2b_conf findtime)]\n  3. 封禁时长 [$(get_f2b_conf bantime)]\n  4. SSH 防护开关\n  5. IP 白名单\n  6. 手动解封\n  7. 递增封禁设置\n  0. 返回"
         read -rp "请选择 [0-7]: " opt
         case "$opt" in
             1) change_f2b_param "最大重试次数" maxretry int ;;
