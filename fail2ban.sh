@@ -921,12 +921,48 @@ f2b_service_menu() {
         echo -e "\n1. 启动\n2. 停止\n3. 重启\n4. 查看状态\n5. 设置开机启动\n6. 取消开机启动\n0. 返回"
         read -rp "请选择 [0-6]: " opt
         case "$opt" in
-            1) test_f2b_config && $SUDO systemctl start fail2ban ;;
-            2) $SUDO systemctl stop fail2ban ;;
-            3) restart_f2b ;;
-            4) $SUDO systemctl status fail2ban --no-pager ;;
-            5) $SUDO systemctl enable fail2ban ;;
-            6) $SUDO systemctl disable fail2ban ;;
+            1)
+                if test_f2b_config >/dev/null 2>&1 && $SUDO systemctl start fail2ban >/dev/null 2>&1; then
+                    echo -e "${INFO} ${GREEN}启动操作成功。${RESET}"
+                else
+                    echo -e "${ERROR} 启动操作失败。"
+                fi
+                ;;
+            2)
+                if $SUDO systemctl stop fail2ban >/dev/null 2>&1; then
+                    echo -e "${INFO} ${GREEN}停止操作成功。${RESET}"
+                else
+                    echo -e "${ERROR} 停止操作失败。"
+                fi
+                ;;
+            3)
+                if restart_f2b >/dev/null 2>&1; then
+                    echo -e "${INFO} ${GREEN}重启操作成功。${RESET}"
+                else
+                    echo -e "${ERROR} 重启操作失败。"
+                fi
+                ;;
+            4)
+                if $SUDO systemctl is-active --quiet fail2ban; then
+                    echo -e "${INFO} ${GREEN}服务运行正常。${RESET}"
+                else
+                    echo -e "${WARN} 服务未运行。"
+                fi
+                ;;
+            5)
+                if $SUDO systemctl enable fail2ban >/dev/null 2>&1; then
+                    echo -e "${INFO} ${GREEN}设置开机启动成功。${RESET}"
+                else
+                    echo -e "${ERROR} 设置开机启动失败。"
+                fi
+                ;;
+            6)
+                if $SUDO systemctl disable fail2ban >/dev/null 2>&1; then
+                    echo -e "${INFO} ${GREEN}取消开机启动成功。${RESET}"
+                else
+                    echo -e "${ERROR} 取消开机启动失败。"
+                fi
+                ;;
             0) return ;; *) echo -e "${ERROR} 无效选项。"; continue ;;
         esac
         f2b_pause
