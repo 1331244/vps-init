@@ -13,6 +13,7 @@ GRAY="\033[90m"; BOLD="\033[1m"; RESET="\033[0m"
 INFO="${GREEN}[INFO]${RESET}"; WARN="${YELLOW}[WARN]${RESET}"; ERROR="${RED}[ERROR]${RESET}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+F2B_MODULE="${SCRIPT_DIR}/fail2ban.sh"
 
 SSHD_MAIN="/etc/ssh/sshd_config"
 SSHD_CONF_DIR="/etc/ssh/sshd_config.d"
@@ -351,12 +352,33 @@ has_valid_pubkey() {
 }
 
 # ============ Fail2Ban（独立模块）============
-if [ -r "${SCRIPT_DIR}/fail2ban.sh" ]; then
+if [ -r "$F2B_MODULE" ] && [ -f "$F2B_MODULE" ]; then
     # shellcheck source=fail2ban.sh
-    . "${SCRIPT_DIR}/fail2ban.sh"
+    . "$F2B_MODULE"
 else
-    echo -e "${ERROR} 无法加载 Fail2Ban 模块: ${SCRIPT_DIR}/fail2ban.sh"
-    exit 1
+    # 支持 bash <(curl .../init.ssh)：此时 BASH_SOURCE 位于 /dev/fd，
+    # 无法通过相对路径访问仓库中的模块，改从同一仓库临时下载配套模块。
+    F2B_MODULE_TMP="$(mktemp "${TMPDIR:-/tmp}/vps-init-fail2ban.XXXXXX.sh")" || {
+        echo -e "${ERROR} 无法创建 Fail2Ban 临时模块文件。"
+        exit 1
+    }
+    rm_f2b_module() { rm -f -- "$F2B_MODULE_TMP"; }
+    trap rm_f2b_module EXIT
+    F2B_MODULE_URL="https://raw.githubusercontent.com/1331244/vps-init/main/fail2ban.sh"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$F2B_MODULE_URL" -o "$F2B_MODULE_TMP"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$F2B_MODULE_TMP" "$F2B_MODULE_URL"
+    else
+        echo -e "${ERROR} 无法加载 Fail2Ban 模块：本地文件不存在，且未找到 curl/wget。"
+        exit 1
+    fi
+    if [ ! -s "$F2B_MODULE_TMP" ]; then
+        echo -e "${ERROR} 无法下载 Fail2Ban 模块: $F2B_MODULE_URL"
+        exit 1
+    fi
+    # shellcheck source=fail2ban.sh
+    . "$F2B_MODULE_TMP"
 fi
 
 # ============ 状态面板 ============
