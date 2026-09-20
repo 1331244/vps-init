@@ -633,23 +633,26 @@ view_f2b_jail_status() {
 }
 
 view_all_banned_ips() {
-    local jail jails status banned_line banned_ips ip index
+    local jail jails status banned_line ip index current_banned total_banned
     jails=$(list_f2b_jails)
     [ -n "$jails" ] || { echo -e "${WARN} 没有可用 Jail。"; f2b_pause; return; }
     for jail in $jails; do
         echo -e "\n${CYAN}[$jail]${RESET}"
         status=$(fail2ban-client status "$jail" 2>/dev/null)
-        echo "$status" | grep -E "Currently banned|Total banned" | sed 's/^[[:space:]]*//'
+        current_banned=$(echo "$status" | awk -F: '/Currently banned/{gsub(/[[:space:]]/,"",$2); print $2}')
+        total_banned=$(echo "$status" | awk -F: '/Total banned/{gsub(/[[:space:]]/,"",$2); print $2}')
+        echo "当前封禁数量: ${current_banned:-0}"
+        echo "累计封禁数量: ${total_banned:-0}"
         banned_line=$(echo "$status" | awk -F: '/Banned IP list/{sub(/^[[:space:]]*/,"",$2); print $2}')
         if [ -n "$banned_line" ]; then
-            echo -e "Banned IP list:"
+            echo -e "封禁 IP 列表:"
             index=1
             for ip in $banned_line; do
                 printf '  %2d. %s\n' "$index" "$ip"
                 index=$((index + 1))
             done
         else
-            echo "Banned IP list: 无"
+            echo "封禁 IP 列表: 无"
         fi
     done
     f2b_pause
