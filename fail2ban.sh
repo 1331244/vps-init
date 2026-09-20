@@ -641,7 +641,11 @@ view_all_banned_ips() {
     jails=$(list_f2b_jails)
     [ -n "$jails" ] || { echo -e "${WARN} 没有可用 Jail。"; f2b_pause; return; }
     for jail in $jails; do
-        echo -e "\n${CYAN}[$jail]${RESET}"
+        if [ "$jail" = "manual-ban" ]; then
+            echo -e "\n${CYAN}[$jail]（手动封禁）${RESET}"
+        else
+            echo -e "\n${CYAN}[$jail]${RESET}"
+        fi
         status=$(fail2ban-client status "$jail" 2>/dev/null)
         current_banned=$(echo "$status" | awk -F: '/Currently banned/{gsub(/[[:space:]]/,"",$2); print $2}')
         total_banned=$(echo "$status" | awk -F: '/Total banned/{gsub(/[[:space:]]/,"",$2); print $2}')
@@ -656,7 +660,11 @@ view_all_banned_ips() {
                 index=$((index + 1))
             done
         else
-            echo "封禁 IP 列表: 无"
+            if [ "${total_banned:-0}" -gt 0 ]; then
+                echo "当前没有封禁 IP（历史累计 ${total_banned} 次）"
+            else
+                echo "当前没有封禁 IP"
+            fi
         fi
     done
     f2b_pause
