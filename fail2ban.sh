@@ -801,15 +801,24 @@ list_custom_jails() {
 read_jail_value() { awk -F= -v k="$2" '$1 ~ "^[[:space:]]*" k "[[:space:]]*$"{sub(/^[^=]*=[[:space:]]*/,""); print; exit}' "$1"; }
 
 run_f2b_regex() {
-    local log=$1 filter_file=$2 output rc
+    local log=$1 filter_file=$2 output rc lines matched missed ignored
     output=$($SUDO fail2ban-regex "$log" "$filter_file" 2>&1); rc=$?
-    echo "$output"
-    echo -e "${CYAN}测试摘要：${RESET}"
-    echo "$output" | grep -E "Lines:|matched|missed|ignored|Failregex:|Ignoreregex:" | tail -n 12
+    lines=$(echo "$output" | sed -nE 's/^[[:space:]]*Lines:[[:space:]]*([0-9]+).*/\1/p' | head -n 1)
+    matched=$(echo "$output" | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+matched.*/\1/p' | head -n 1)
+    missed=$(echo "$output" | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+missed.*/\1/p' | head -n 1)
+    ignored=$(echo "$output" | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+ignored.*/\1/p' | head -n 1)
+    echo -e "${CYAN}规则测试结果：${RESET}"
+    echo "日志总行数: ${lines:-未知}"
+    echo "匹配数量: ${matched:-0}"
+    echo "未匹配数量: ${missed:-0}"
+    echo "忽略数量: ${ignored:-0}"
     if [ "$rc" -eq 0 ] && echo "$output" | grep -Eq "[1-9][0-9]* matched|Failregex:[[:space:]]+[1-9]"; then
         echo -e "${INFO} ${GREEN}规则测试成功且存在匹配。${RESET}"; return 0
     fi
-    echo -e "${ERROR} 规则测试未通过或没有匹配日志，请检查语法、日志格式与路径。"; return 1
+    echo -e "${ERROR} 规则测试未通过或没有匹配日志，请检查语法、日志格式与路径。"
+    echo -e "${YELLOW}详细错误信息：${RESET}"
+    echo "$output" | tail -n 12
+    return 1
 }
 
 test_custom_rule() {
