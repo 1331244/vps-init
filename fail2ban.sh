@@ -633,11 +633,24 @@ view_f2b_jail_status() {
 }
 
 view_all_banned_ips() {
-    local jail jails; jails=$(list_f2b_jails)
+    local jail jails status banned_line banned_ips ip index
+    jails=$(list_f2b_jails)
     [ -n "$jails" ] || { echo -e "${WARN} 没有可用 Jail。"; f2b_pause; return; }
     for jail in $jails; do
-        echo -e "${CYAN}[$jail]${RESET}"
-        fail2ban-client status "$jail" 2>/dev/null | grep -E "Currently banned|Total banned|Banned IP list"
+        echo -e "\n${CYAN}[$jail]${RESET}"
+        status=$(fail2ban-client status "$jail" 2>/dev/null)
+        echo "$status" | grep -E "Currently banned|Total banned" | sed 's/^[[:space:]]*//'
+        banned_line=$(echo "$status" | awk -F: '/Banned IP list/{sub(/^[[:space:]]*/,"",$2); print $2}')
+        if [ -n "$banned_line" ]; then
+            echo -e "Banned IP list:"
+            index=1
+            for ip in $banned_line; do
+                printf '  %2d. %s\n' "$index" "$ip"
+                index=$((index + 1))
+            done
+        else
+            echo "Banned IP list: 无"
+        fi
     done
     f2b_pause
 }
