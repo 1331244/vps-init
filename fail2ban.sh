@@ -933,7 +933,9 @@ write_custom_rule() {
         return
     fi
     f2b_action_exists "$action" || { echo -e "${ERROR} Fail2Ban action 不存在: $action"; return; }
-    echo -e "${CYAN}请输入 failregex（必须包含 <HOST>，单行；留空保留现有 Filter）:${RESET}"
+    echo -e "${CYAN}Filter 用于从日志中识别攻击行为，系统不会自动猜测正则。${RESET}"
+    echo -e "${CYAN}请根据实际日志输入 failregex；必须包含 <HOST>（代表待封禁 IP），单行；留空保留现有 Filter。${RESET}"
+    echo -e "${GRAY}示例：^.*Login failed from <HOST>.*$${RESET}"
     read -r regex
     filter_tmp=$(mktemp); jail_tmp=$(mktemp)
     if [ -z "$regex" ] && [ -f "$(custom_filter_existing "$dfilter")" ]; then cp "$(custom_filter_existing "$dfilter")" "$filter_tmp"
@@ -959,6 +961,8 @@ write_custom_rule() {
     rm -f "$jail_backup" "$filter_backup"
     if fail2ban-client ping >/dev/null 2>&1; then $SUDO fail2ban-client reload
     else echo -e "${WARN} 配置测试通过；服务未运行，将在下次启动时生效。"; fi
+    echo -e "${INFO} Jail 文件：${jail_file}"
+    echo -e "${INFO} Filter 文件：${filter_file}"
 }
 
 edit_custom_rule() {
@@ -995,7 +999,34 @@ delete_custom_rule() {
     if fail2ban-client ping >/dev/null 2>&1; then $SUDO fail2ban-client reload
     else echo -e "${WARN} 配置测试通过；服务未运行，删除将在下次启动时生效。"; fi
 }
-view_custom_rules() { local jail file; for jail in $(list_custom_jails); do file=$(find_custom_jail_file "$jail") || continue; echo -e "\n${CYAN}--- $jail ($file) ---${RESET}"; $SUDO sed -n '1,120p' "$file"; done; f2b_pause; }
+view_custom_rules() {
+    local jail file filter filter_file
+    for jail in $(list_custom_jails); do
+        file=$(find_custom_jail_file "$jail") || continue
+        filter=$(read_jail_value "$file" filter)
+        filter_file=$(custom_filter_existing "$filter")
+        echo -e "\n${CYAN}--- Jail: $jail ($file) ---${RESET}"
+        $SUDO sed -n '1,120p' "$file"
+        echo -e "${CYAN}--- Filter: $filter (${filter_file}) ---${RESET}"
+        if [ -f "$filter_file" ]; then
+            $SUDO sed -n '1,120p' "$filter_file"
+            if command -v fail2ban-regex >/dev/null 2>&1; then
+                local log matches
+                log=$(read_jail_value "$file" logpath)
+                if [ -f "$log" ]; then
+                    matches=$($SUDO fail2ban-regex "$log" "$filter_file" 2>/dev/null | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+matched.*/\1/p' | head -n1)
+                    echo -e "${INFO} 当前日志匹配数量：${matches:-0}"
+                else
+                    echo -e "${WARN} 日志文件不存在，无法测试：${log}"
+                fi
+            fi
+        else
+            echo -e "${ERROR} Filter 文件不存在，规则无法匹配和封禁 IP。"
+            echo -e "${YELLOW}请创建：${F2B_FILTER_DIR}/${filter}.conf${RESET}"
+        fi
+    done
+    f2b_pause
+}
 custom_rules_menu() {
     while true; do
         f2b_clear
