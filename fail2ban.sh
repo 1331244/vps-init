@@ -802,13 +802,52 @@ ssh_f2b_menu() {
 }
 
 custom_jail_file() { printf '%s/vps-init-%s.local' "$F2B_JAIL_DIR" "$1"; }
-custom_filter_file() { printf '%s/%s.local' "$F2B_FILTER_DIR" "$1"; }
-list_custom_jails() {
-    local file name
-    for file in "$F2B_JAIL_DIR"/vps-init-*.local; do
-        [ -f "$file" ] && grep -qFx "$F2B_MANAGED_TAG" "$file" || continue
-        name=${file##*/vps-init-}; echo "${name%.local}"
+# Fail2Ban 的 filter.d 默认只扫描 *.conf；使用 .local 会导致规则文件
+# 虽然写入成功、fail2ban-regex 也能测试通过，但服务实际加载不到。
+# 自定义 Filter 统一使用 .conf（Jail 仍可使用 .local）。
+custom_filter_file() { printf '%s/%s.conf' "$F2B_FILTER_DIR" "$1"; }
+custom_filter_existing() {
+    local name=$1
+    if [ -f "$(custom_filter_file "$name")" ]; then
+        custom_filter_file "$name"
+    elif [ -f "$F2B_FILTER_DIR/${name}.local" ]; then
+        printf '%s/%s.local' "$F2B_FILTER_DIR" "$name"
+    else
+        custom_filter_file "$name"
+    fi
+}
+find_custom_jail_file() {
+    local jail=$1 file
+    file=$(custom_jail_file "$jail")
+    [ -f "$file" ] && { printf '%s\n' "$file"; return 0; }
+    for file in "$F2B_JAIL_DIR"/*.local "$F2B_JAIL_DIR"/*.conf; do
+        [ -f "$file" ] || continue
+        awk -v s="$jail" '$0 ~ "^\\[" s "\\][[:space:]]*$" {found=1; exit} END {exit !found}' "$file" \
+            && { printf '%s\n' "$file"; return 0; }
     done
+    return 1
+}
+list_custom_jails() {
+    local file name section enabled
+    [ -d "$F2B_JAIL_DIR" ] || return 0
+    # 同时显示脚本创建的 Jail 和用户手动放入 jail.d 的自定义配置。
+    # whitelist 文件不是 Jail，且仅显示包含实际段落的配置，避免把目录中的
+    # 注释/备份文件误认为规则。
+    for file in "$F2B_JAIL_DIR"/*.local "$F2B_JAIL_DIR"/*.conf; do
+        [ -f "$file" ] || continue
+        [ "${file##*/}" = "vps-init-whitelist.local" ] && continue
+        while IFS= read -r section; do
+            name=${section#\[}; name=${name%\]}
+            [ "$name" = DEFAULT ] && continue
+            enabled=$(awk -v s="$name" '
+                $0 ~ "^\\[" s "\\][[:space:]]*$" {inside=1; next}
+                /^[[:space:]]*\[/ {inside=0}
+                inside && /^[[:space:]]*enabled[[:space:]]*=/ {v=$0; sub(/^[^=]*=[[:space:]]*/,"",v); print v; exit}
+            ' "$file")
+            [ "$enabled" = true ] || grep -qFx "$F2B_MANAGED_TAG" "$file" || continue
+            echo "$name"
+        done < <(sed -nE 's/^\[([^]]+)\][[:space:]]*$/[\1]/p' "$file")
+    done | sort -u
 }
 read_jail_value() { awk -F= -v k="$2" '$1 ~ "^[[:space:]]*" k "[[:space:]]*$"{sub(/^[^=]*=[[:space:]]*/,""); print; exit}' "$1"; }
 
@@ -840,10 +879,10 @@ test_custom_rule() {
         read -rp "输入 Jail 名称: " jail
     fi
     validate_f2b_name "$jail" || { echo -e "${ERROR} Jail 名称无效。"; return 1; }
-    file=$(custom_jail_file "$jail"); [ -f "$file" ] || { echo -e "${ERROR} 找不到该自定义 Jail。"; return 1; }
+    file=$(find_custom_jail_file "$jail") || { echo -e "${ERROR} 找不到该自定义 Jail。"; return 1; }
     filter=$(read_jail_value "$file" filter); log=$(read_jail_value "$file" logpath)
     [ -f "$log" ] || { echo -e "${ERROR} 日志文件不存在: $log"; return 1; }
-    filter_file=$(custom_filter_file "$filter")
+    filter_file=$(custom_filter_existing "$filter")
     [ -f "$filter_file" ] || filter_file="$F2B_FILTER_DIR/${filter}.conf"
     [ -f "$filter_file" ] || { echo -e "${ERROR} Filter 文件不存在。"; return 1; }
     run_f2b_regex "$log" "$filter_file"
@@ -879,7 +918,7 @@ write_custom_rule() {
     echo -e "${CYAN}请输入 failregex（必须包含 <HOST>，单行；留空保留现有 Filter）:${RESET}"
     read -r regex
     filter_tmp=$(mktemp); jail_tmp=$(mktemp)
-    if [ -z "$regex" ] && [ -f "$(custom_filter_file "$dfilter")" ]; then cp "$(custom_filter_file "$dfilter")" "$filter_tmp"
+    if [ -z "$regex" ] && [ -f "$(custom_filter_existing "$dfilter")" ]; then cp "$(custom_filter_existing "$dfilter")" "$filter_tmp"
     elif [[ "$regex" == *'<HOST>'* ]]; then printf '%s\n%s\n%s\n' "$F2B_MANAGED_TAG" '[Definition]' "failregex = $regex" > "$filter_tmp"
     else echo -e "${ERROR} failregex 必须包含 <HOST>。"; rm -f "$filter_tmp" "$jail_tmp"; return; fi
     whitelist=$(get_f2b_whitelist)
@@ -904,13 +943,19 @@ write_custom_rule() {
     else echo -e "${WARN} 配置测试通过；服务未运行，将在下次启动时生效。"; fi
 }
 
-edit_custom_rule() { local jail; echo -e "自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"; read -rp "输入要修改的 Jail: " jail; [ -f "$(custom_jail_file "$jail")" ] && write_custom_rule edit "$jail" || echo -e "${ERROR} Jail 不存在。"; }
+edit_custom_rule() {
+    local jail file
+    echo -e "自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"; read -rp "输入要修改的 Jail: " jail
+    file=$(find_custom_jail_file "$jail") || { echo -e "${ERROR} Jail 不存在。"; return; }
+    grep -qFx "$F2B_MANAGED_TAG" "$file" || { echo -e "${ERROR} 该 Jail 不是本脚本创建的；为避免覆盖手工配置，仅支持查看和测试。"; return; }
+    write_custom_rule edit "$jail"
+}
 delete_custom_rule() {
     local jail file filter filter_file refs jail_backup filter_backup="" remove_filter=0
     echo -e "自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"; read -rp "输入要删除的 Jail: " jail
     validate_f2b_name "$jail" && [ "$jail" != sshd ] || { echo -e "${ERROR} 名称无效。"; return; }
     file=$(custom_jail_file "$jail"); [ -f "$file" ] && grep -qFx "$F2B_MANAGED_TAG" "$file" || { echo -e "${ERROR} 不是本脚本管理的 Jail，拒绝删除。"; return; }
-    filter=$(read_jail_value "$file" filter); filter_file=$(custom_filter_file "$filter")
+    filter=$(read_jail_value "$file" filter); filter_file=$(custom_filter_existing "$filter")
     echo -e "将删除 Jail: ${RED}$jail${RESET}\n配置: $file\nFilter: $filter_file"
     read -rp "确认删除？(y/N): " confirm; [[ "$confirm" =~ ^[Yy]$ ]] || return
     jail_backup=$(mktemp); $SUDO cp "$file" "$jail_backup"
@@ -932,7 +977,7 @@ delete_custom_rule() {
     if fail2ban-client ping >/dev/null 2>&1; then $SUDO fail2ban-client reload
     else echo -e "${WARN} 配置测试通过；服务未运行，删除将在下次启动时生效。"; fi
 }
-view_custom_rules() { local jail file; for jail in $(list_custom_jails); do file=$(custom_jail_file "$jail"); echo -e "\n${CYAN}--- $jail ---${RESET}"; $SUDO sed -n '1,120p' "$file"; done; f2b_pause; }
+view_custom_rules() { local jail file; for jail in $(list_custom_jails); do file=$(find_custom_jail_file "$jail") || continue; echo -e "\n${CYAN}--- $jail ($file) ---${RESET}"; $SUDO sed -n '1,120p' "$file"; done; f2b_pause; }
 custom_rules_menu() {
     while true; do
         f2b_clear
@@ -964,14 +1009,14 @@ f2b_service_menu() {
         read -rp "请选择 [0-6]: " opt
         case "$opt" in
             1)
-                if test_f2b_config >/dev/null 2>&1 && $SUDO systemctl start fail2ban >/dev/null 2>&1; then
+                if test_f2b_config >/dev/null 2>&1 && svc_start fail2ban; then
                     echo -e "${INFO} ${GREEN}启动操作成功。${RESET}"
                 else
                     echo -e "${ERROR} 启动操作失败。"
                 fi
                 ;;
             2)
-                if $SUDO systemctl stop fail2ban >/dev/null 2>&1; then
+                if svc_stop fail2ban; then
                     echo -e "${INFO} ${GREEN}停止操作成功。${RESET}"
                 else
                     echo -e "${ERROR} 停止操作失败。"
@@ -985,21 +1030,27 @@ f2b_service_menu() {
                 fi
                 ;;
             4)
-                if $SUDO systemctl is-active --quiet fail2ban; then
+                local active=1
+                case "$INIT_SYS" in
+                    systemd) $SUDO systemctl is-active --quiet fail2ban && active=0 ;;
+                    openrc) $SUDO rc-service fail2ban status >/dev/null 2>&1 && active=0 ;;
+                    sysvinit) $SUDO service fail2ban status >/dev/null 2>&1 && active=0 ;;
+                esac
+                if [ "$active" -eq 0 ]; then
                     echo -e "${INFO} ${GREEN}服务运行正常。${RESET}"
                 else
                     echo -e "${WARN} 服务未运行。"
                 fi
                 ;;
             5)
-                if $SUDO systemctl enable fail2ban >/dev/null 2>&1; then
+                if svc_enable fail2ban; then
                     echo -e "${INFO} ${GREEN}设置开机启动成功。${RESET}"
                 else
                     echo -e "${ERROR} 设置开机启动失败。"
                 fi
                 ;;
             6)
-                if $SUDO systemctl disable fail2ban >/dev/null 2>&1; then
+                if svc_disable fail2ban; then
                     echo -e "${INFO} ${GREEN}取消开机启动成功。${RESET}"
                 else
                     echo -e "${ERROR} 取消开机启动失败。"
