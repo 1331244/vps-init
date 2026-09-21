@@ -868,11 +868,89 @@ list_custom_jails() {
         done < <(sed -nE 's/^\[([^]]+)\][[:space:]]*$/[\1]/p' "$file")
     done | sort -u
 }
-read_jail_value() { awk -F= -v k="$2" '$1 ~ "^[[:space:]]*" k "[[:space:]]*$"{sub(/^[^=]*=[[:space:]]*/,""); print; exit}' "$1"; }
+# Emit jail configuration files in Fail2Ban's documented load order.
+f2b_jail_config_files() {
+    local file
+    [ -f /etc/fail2ban/jail.conf ] && printf '%s\n' /etc/fail2ban/jail.conf
+    for file in "$F2B_JAIL_DIR"/*.conf; do [ -f "$file" ] && printf '%s\n' "$file"; done
+    [ -f "$JAIL_CONF" ] && printf '%s\n' "$JAIL_CONF"
+    for file in "$F2B_JAIL_DIR"/*.local; do [ -f "$file" ] && printf '%s\n' "$file"; done
+}
+
+# Read the merged value after [DEFAULT] inheritance and jail-level overrides.
+# The first argument is retained for compatibility with callers, but a value
+# cannot be resolved correctly from one file because Fail2Ban merges all files.
+read_jail_value() {
+    local _file=$1 key=$2 section=${3:-} value files=()
+    mapfile -t files < <(f2b_jail_config_files)
+    [ "${#files[@]}" -gt 0 ] || return 0
+    value=$(awk -v k="$key" -v s="$section" '
+        function clean(v){sub(/^[^=]*=[[:space:]]*/,"",v); sub(/[[:space:]]+$/, "", v); return v}
+        /^[[:space:]]*\[/ {cur=$0; sub(/^.*\[/,"",cur); sub(/\].*$/, "",cur); next}
+        /^[[:space:]]*[#;]/ {next}
+        /^[[:space:]]*[^=]+[[:space:]]*=/ {
+            name=$0; sub(/[[:space:]]*=.*$/, "", name); sub(/^[[:space:]]*/, "", name)
+            if (name != k) next
+            v=clean($0); if (cur==s) {j=v; jf=1} else if (cur=="DEFAULT") {d=v; df=1}
+        }
+        END {if (jf) print j; else if (df) print d}
+    ' "${files[@]}")
+    if [ "$key" = filter ] && [ -n "$section" ]; then
+        # Fail2Ban's default is %(__name__)s; an omitted filter therefore means
+        # the jail name, never filter.d/.conf.
+        [ -n "$value" ] || value=$section
+        value=${value//%(__name__)s/$section}
+        value=${value%%\[*}
+    fi
+    printf '%s\n' "$value"
+}
+
+# Query values that fail2ban-client has already expanded. This handles backend
+# auto-selection, logpath interpolation/globs and journalmatch more faithfully
+# than reproducing Fail2Ban's Python configuration engine in shell.
+read_effective_jail_value() {
+    local jail=$1 key=$2 dump line value=""
+    if command -v fail2ban-client >/dev/null 2>&1; then
+        dump=$($SUDO fail2ban-client -d 2>/dev/null) || dump=""
+        while IFS= read -r line; do
+            case "$key:$line" in
+                backend:*"['add', '$jail', "*)
+                    value=${line#*"['add', '$jail', '"}; value=${value%%"'"*}; break ;;
+                logpath:*"['set', '$jail', 'addlogpath', "*)
+                    value=${line#*"['set', '$jail', 'addlogpath', '"}; value=${value%%"'"*}; break ;;
+                journalmatch:*"['set', '$jail', 'addjournalmatch', "*)
+                    value=${line#*"['set', '$jail', 'addjournalmatch', "}
+                    value=${value%]}; value=${value#\'}; value=${value%\'}
+                    value=${value//"', '"/ }; break ;;
+            esac
+        done <<< "$dump"
+    fi
+    if [ -z "$value" ]; then
+        read_jail_value "" "$key" "$jail"
+    else
+        printf '%s\n' "$value"
+    fi
+}
+
+f2b_jail_source_type() {
+    local jail=$1 backend log journal
+    backend=$(read_effective_jail_value "$jail" backend)
+    log=$(read_effective_jail_value "$jail" logpath)
+    journal=$(read_effective_jail_value "$jail" journalmatch)
+    if [ "$backend" = systemd ] || { [ -n "$journal" ] && [ -z "$log" ]; }; then
+        echo journal
+    else
+        echo file
+    fi
+}
 
 run_f2b_regex() {
-    local log=$1 filter_file=$2 output rc lines matched missed ignored
-    output=$($SUDO fail2ban-regex "$log" "$filter_file" 2>&1); rc=$?
+    local log=$1 filter_file=$2 journalmatch=${3:-} output rc lines matched missed ignored
+    if [ "$log" = systemd-journal ]; then
+        output=$($SUDO fail2ban-regex systemd-journal "$filter_file" --journalmatch="$journalmatch" 2>&1); rc=$?
+    else
+        output=$($SUDO fail2ban-regex "$log" "$filter_file" 2>&1); rc=$?
+    fi
     lines=$(echo "$output" | sed -nE 's/^[[:space:]]*Lines:[[:space:]]*([0-9]+).*/\1/p' | head -n 1)
     matched=$(echo "$output" | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+matched.*/\1/p' | head -n 1)
     missed=$(echo "$output" | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+missed.*/\1/p' | head -n 1)
@@ -892,19 +970,27 @@ run_f2b_regex() {
 }
 
 test_custom_rule() {
-    local jail=${1:-} file filter log filter_file
+    local jail=${1:-} file filter log filter_file source journal
     if [ -z "$jail" ]; then
         echo -e "已有自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"
         read -rp "输入 Jail 名称: " jail
     fi
     validate_f2b_name "$jail" || { echo -e "${ERROR} Jail 名称无效。"; return 1; }
     file=$(find_custom_jail_file "$jail") || { echo -e "${ERROR} 找不到该自定义 Jail。"; return 1; }
-    filter=$(read_jail_value "$file" filter); log=$(read_jail_value "$file" logpath)
-    [ -f "$log" ] || { echo -e "${ERROR} 日志文件不存在: $log"; return 1; }
+    filter=$(read_jail_value "$file" filter "$jail")
+    source=$(f2b_jail_source_type "$jail")
+    log=$(read_effective_jail_value "$jail" logpath)
     filter_file=$(custom_filter_existing "$filter")
     [ -f "$filter_file" ] || filter_file="$F2B_FILTER_DIR/${filter}.conf"
     [ -f "$filter_file" ] || { echo -e "${ERROR} Filter 文件不存在。"; return 1; }
-    run_f2b_regex "$log" "$filter_file"
+    if [ "$source" = journal ]; then
+        journal=$(read_effective_jail_value "$jail" journalmatch)
+        [ -n "$journal" ] || { echo -e "${ERROR} systemd Jail 缺少 journalmatch。"; return 1; }
+        run_f2b_regex systemd-journal "$filter_file" "$journal"
+    else
+        [ -f "$log" ] || { echo -e "${ERROR} 日志文件不存在: $log"; return 1; }
+        run_f2b_regex "$log" "$filter_file"
+    fi
 }
 
 write_custom_rule() {
@@ -917,9 +1003,9 @@ write_custom_rule() {
     if [ "$mode" = create ] && [ -e "$(custom_jail_file "$jail")" ]; then echo -e "${ERROR} Jail 已存在。"; return; fi
     local dfilter="" dlog="" dmax=3 dfind=1h dban=-1 daction
     if [ "$mode" = edit ]; then
-        dfilter=$(read_jail_value "$old_file" filter); dlog=$(read_jail_value "$old_file" logpath)
-        dmax=$(read_jail_value "$old_file" maxretry); dfind=$(read_jail_value "$old_file" findtime)
-        dban=$(read_jail_value "$old_file" bantime); daction=$(read_jail_value "$old_file" banaction)
+        dfilter=$(read_jail_value "$old_file" filter "$old_jail"); dlog=$(read_effective_jail_value "$old_jail" logpath)
+        dmax=$(read_jail_value "$old_file" maxretry "$old_jail"); dfind=$(read_jail_value "$old_file" findtime "$old_jail")
+        dban=$(read_jail_value "$old_file" bantime "$old_jail"); daction=$(read_jail_value "$old_file" banaction "$old_jail")
     fi
     read -rp "Filter 名称${dfilter:+ [$dfilter]}: " filter; filter=${filter:-$dfilter}
     read -rp "日志绝对路径${dlog:+ [$dlog]}: " log; log=${log:-$dlog}
@@ -943,7 +1029,7 @@ write_custom_rule() {
     elif [[ "$regex" == *'<HOST>'* ]]; then printf '%s\n%s\n%s\n' "$F2B_MANAGED_TAG" '[Definition]' "failregex = $regex" > "$filter_tmp"
     else echo -e "${ERROR} failregex 必须包含 <HOST>。"; rm -f "$filter_tmp" "$jail_tmp"; return; fi
     whitelist=$(get_f2b_whitelist)
-    printf '%s\n[%s]\nenabled = true\nfilter = %s\nlogpath = %s\nmaxretry = %s\nfindtime = %s\nbantime = %s\nbantime.increment = false\nbanaction = %s\nignoreip = %s\n' "$F2B_MANAGED_TAG" "$jail" "$filter" "$log" "$maxretry" "$findtime" "$bantime" "$action" "$whitelist" > "$jail_tmp"
+    printf '%s\n[%s]\nenabled = true\nfilter = %s\nbackend = auto\nlogpath = %s\nmaxretry = %s\nfindtime = %s\nbantime = %s\nbantime.increment = false\nbanaction = %s\nignoreip = %s\n' "$F2B_MANAGED_TAG" "$jail" "$filter" "$log" "$maxretry" "$findtime" "$bantime" "$action" "$whitelist" > "$jail_tmp"
     # 在触碰正式配置前先验证实际日志和候选 Filter。
     run_f2b_regex "$log" "$filter_tmp" || { rm -f "$jail_tmp" "$filter_tmp"; return; }
     jail_file=$(custom_jail_file "$jail"); filter_file=$(custom_filter_file "$filter")
@@ -978,7 +1064,7 @@ delete_custom_rule() {
     echo -e "自定义 Jail: ${YELLOW}$(list_custom_jails | xargs)${RESET}"; read -rp "输入要删除的 Jail: " jail
     validate_f2b_name "$jail" && [ "$jail" != sshd ] || { echo -e "${ERROR} 名称无效。"; return; }
     file=$(custom_jail_file "$jail"); [ -f "$file" ] && grep -qFx "$F2B_MANAGED_TAG" "$file" || { echo -e "${ERROR} 不是本脚本管理的 Jail，拒绝删除。"; return; }
-    filter=$(read_jail_value "$file" filter); filter_file=$(custom_filter_existing "$filter")
+    filter=$(read_jail_value "$file" filter "$jail"); filter_file=$(custom_filter_existing "$filter")
     echo -e "将删除 Jail: ${RED}$jail${RESET}\n配置: $file\nFilter: $filter_file"
     read -rp "确认删除？(y/N): " confirm; [[ "$confirm" =~ ^[Yy]$ ]] || return
     jail_backup=$(mktemp); $SUDO cp "$file" "$jail_backup"
@@ -1001,13 +1087,18 @@ delete_custom_rule() {
     else echo -e "${WARN} 配置测试通过；服务未运行，删除将在下次启动时生效。"; fi
 }
 view_custom_rules() {
-    local jail file filter filter_file
+    local jail file filter filter_file source backend journal
     for jail in $(list_custom_jails); do
         file=$(find_custom_jail_file "$jail") || continue
-        filter=$(read_jail_value "$file" filter)
+        filter=$(read_jail_value "$file" filter "$jail")
         filter_file=$(custom_filter_existing "$filter")
+        source=$(f2b_jail_source_type "$jail")
+        backend=$(read_effective_jail_value "$jail" backend)
+        journal=$(read_effective_jail_value "$jail" journalmatch)
         echo -e "\n${CYAN}--- Jail: $jail ($file) ---${RESET}"
         $SUDO sed -n '1,120p' "$file"
+        echo -e "${INFO} 有效日志源：${source}（backend=${backend:-auto}）"
+        [ -n "$journal" ] && echo -e "${INFO} journalmatch：$journal"
         # manual-ban 由 fail2ban-client 手动注入 IP，不依赖日志 Filter。
         if [ "$jail" = manual-ban ] || [ -z "$filter" ]; then
             echo -e "${INFO} 该 Jail 未配置 Filter（手动封禁 Jail，无需日志匹配）。"
@@ -1018,8 +1109,10 @@ view_custom_rules() {
             $SUDO sed -n '1,120p' "$filter_file"
             if command -v fail2ban-regex >/dev/null 2>&1; then
                 local log matches
-                log=$(read_jail_value "$file" logpath)
-                if [ -f "$log" ]; then
+                log=$(read_effective_jail_value "$jail" logpath)
+                if [ "$source" = journal ]; then
+                    echo -e "${INFO} Journal Jail 使用 fail2ban-client -t 验证配置。"
+                elif [ -f "$log" ]; then
                     matches=$($SUDO fail2ban-regex "$log" "$filter_file" 2>/dev/null | sed -nE 's/.*[^0-9]([0-9]+)[[:space:]]+matched.*/\1/p' | head -n1)
                     echo -e "${INFO} 当前日志匹配数量：${matches:-0}"
                 else
