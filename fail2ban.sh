@@ -856,7 +856,8 @@ list_custom_jails() {
         [ "${file##*/}" = "vps-init-whitelist.local" ] && continue
         while IFS= read -r section; do
             name=${section#\[}; name=${name%\]}
-            [ "$name" = DEFAULT ] && continue
+            # sshd 是安装时的内置 Jail，不属于自定义规则管理范围。
+            [ "$name" = DEFAULT ] || [ "$name" = sshd ] && continue
             enabled=$(awk -v s="$name" '
                 $0 ~ "^\\[" s "\\][[:space:]]*$" {inside=1; next}
                 /^[[:space:]]*\[/ {inside=0}
@@ -1007,6 +1008,11 @@ view_custom_rules() {
         filter_file=$(custom_filter_existing "$filter")
         echo -e "\n${CYAN}--- Jail: $jail ($file) ---${RESET}"
         $SUDO sed -n '1,120p' "$file"
+        # manual-ban 由 fail2ban-client 手动注入 IP，不依赖日志 Filter。
+        if [ "$jail" = manual-ban ] || [ -z "$filter" ]; then
+            echo -e "${INFO} 该 Jail 未配置 Filter（手动封禁 Jail，无需日志匹配）。"
+            continue
+        fi
         echo -e "${CYAN}--- Filter: $filter (${filter_file}) ---${RESET}"
         if [ -f "$filter_file" ]; then
             $SUDO sed -n '1,120p' "$filter_file"
