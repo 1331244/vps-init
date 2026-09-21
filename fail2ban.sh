@@ -630,9 +630,27 @@ view_f2b_jail_status() {
     local jails jail
     jails=$(list_f2b_jails); echo -e "所有 Jail: ${YELLOW}${jails:-无或服务未运行}${RESET}"
     read -rp "输入要查看的 Jail（留空仅查看总体状态）: " jail
-    if [ -z "$jail" ]; then fail2ban-client status
-    elif validate_f2b_name "$jail" && echo " $jails " | grep -Fq " $jail "; then fail2ban-client status "$jail"
+    # 将 fail2ban-client 的状态字段汉化，数值、Jail 名称和 IP 原样保留。
+    local status_output
+    if [ -z "$jail" ]; then
+        status_output=$(fail2ban-client status)
+    elif validate_f2b_name "$jail" && echo " $jails " | grep -Fq " $jail "; then
+        status_output=$(fail2ban-client status "$jail")
     else echo -e "${ERROR} Jail 不存在或名称无效。"; fi
+    if [ -n "${status_output:-}" ]; then
+        echo "$status_output" | sed \
+            -e 's/^Status for the jail:/Jail 状态：/' \
+            -e 's/^Number of jail:/Jail 数量：/' \
+            -e 's/^Jail list:/Jail 列表：/' \
+            -e 's/Currently failed:/当前失败次数：/' \
+            -e 's/Total failed:/累计失败次数：/' \
+            -e 's/Journal matches:/Journal 匹配：/' \
+            -e 's/Currently banned:/当前封禁数量：/' \
+            -e 's/Total banned:/累计封禁数量：/' \
+            -e 's/Banned IP list:/封禁 IP 列表：/' \
+            -e 's/Actions/动作/' \
+            -e 's/Filter/过滤器/'
+    fi
     f2b_pause
 }
 
